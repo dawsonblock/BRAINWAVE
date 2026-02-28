@@ -1,4 +1,5 @@
 #include "kernels.h"
+#include <cmath>
 #include <math_functions.h>
 
 __global__ void kernel_sensory_endocrine(LeviathanDeviceState state) {
@@ -8,8 +9,14 @@ __global__ void kernel_sensory_endocrine(LeviathanDeviceState state) {
 
   // In Leviathan v2.0, the sensory environment dictates S_i(t)
   // S_i(t) = I_0 / d * sin(theta - phi_i)
-  // For now we assume S_i(t) is written to device memory asynchronously by a
-  // host AI agent
+  // This is typically written by host memory async, here we stub with 0
+  state.d_sensory_forcing[i] = 0.0f;
+
+  // Only Thread 0 runs the global Endocrine Integrations
+  if (i == 0) {
+    // Not 100% parallel friendly to do it here, but convenient since it's
+    // scalar state (DA, NA, SER, ACH) would be updated here.
+  }
 }
 
 __global__ void kernel_synaptic_integration(LeviathanDeviceState state) {
@@ -91,14 +98,61 @@ __global__ void kernel_kinematics(LeviathanDeviceState state) {
 }
 
 __global__ void kernel_plasticity_ptdp(LeviathanDeviceState state) {
-  int edge_idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (edge_idx >= state.num_edges)
+  int dst = blockIdx.x * blockDim.x + threadIdx.x;
+  if (dst >= state.num_nodes)
     return;
 
-  // Recompute dst from binary search or store an array of dsts for edges.
-  // For PTDP, we actually probably want threads over Nodes instead of Edges,
-  // or we store an array of d_csr_dst_indices parallel to col_indices.
-  // To simplify: let's do 1 thread per dst node, looping its edges.
+  float current_phi = state.d_phi[dst];
+  float w_sum = 0.0f;
+
+  int row_start = state.d_csr_row_ptrs[dst];
+  int row_end = state.d_csr_row_ptrs[dst + 1];
+
+  // Pass 1: Apply PTDP updates
+  for (int edge = row_start; edge < row_end; edge++) {
+    int src = state.d_csr_col_indices[edge];
+    float w = state.d_csr_weights[edge];
+    int delay = state.d_delay_ticks[edge];
+
+    int target_tick = (state.current_tick - delay) % MAX_DELAY_TICKS;
+    if (target_tick < 0) {
+      target_tick += MAX_DELAY_TICKS;
+    }
+
+    float delayed_phi =
+        state.d_history_phi[target_tick * state.num_nodes + src];
+    float delta_phi = delayed_phi - current_phi; // phi_j(t - \tau) - phi_i(t)
+
+    // Normalize delta phase to [-PI, PI]
+    delta_phi = fmodf(delta_phi + M_PI, 2.0f * M_PI);
+    if (delta_phi < 0)
+      delta_phi += 2.0f * M_PI;
+    delta_phi -= M_PI;
+
+    float dw = 0.0f;
+    if (delta_phi > 0.0f) {
+      // Node j leads Node i
+      dw = state.DA * A_PLUS * expf(-delta_phi / TAU_PLUS);
+    } else {
+      // Node i leads Node j
+      dw = -A_MINUS * expf(delta_phi / TAU_MINUS);
+    }
+
+    w += dw * DT;
+    if (w < 0.0f)
+      w = 0.0f; // Weights cannot be negative
+
+    state.d_csr_weights[edge] = w;
+    w_sum += w;
+  }
+
+  // Pass 2: Homeostatic Normalization
+  if (w_sum > SYNAPTIC_W_MAX) {
+    float scale = SYNAPTIC_W_MAX / w_sum;
+    for (int edge = row_start; edge < row_end; edge++) {
+      state.d_csr_weights[edge] *= scale;
+    }
+  }
 }
 
 __global__ void kernel_metabolism(LeviathanDeviceState state) {
