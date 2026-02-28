@@ -1,60 +1,65 @@
-import torch
-from .config import A_PLUS, A_MINUS, TAU_PLUS, TAU_MINUS, SYNAPTIC_W_MAX, DT
+"""
+plasticity.py — Sparse CSR Phase-Timing-Dependent Plasticity (Phase 9)
 
-def apply_ptdp(weights: torch.Tensor, current_phi: torch.Tensor, delayed_phi: torch.Tensor, dopamine: float):
+Key changes over Phase 7:
+  - Works directly on CSR edge arrays (no NxN allocation)
+  - Uses per-edge delayed phases returned by network.step()
+  - atan2 wrapping for correct [-π, π] delta_phi
+  - Per-row homeostatic normalization identical to CUDA kernel
+"""
+
+import torch
+from .config import SYNAPTIC_W_MAX
+
+ETA_PLUS = 0.001  # LTP rate
+ETA_MINUS = 0.001  # LTD rate
+TAU_PLUS = 0.5  # LTP time constant
+TAU_MINUS = 0.5  # LTD time constant
+
+
+def apply_ptdp(network, delayed_phi_edge: torch.Tensor):
     """
-    Applies Phase-Timing-Dependent Plasticity to the weight matrix in place.
-    
-    delta_w = DA * A+ * e^(-delta_phi / tau+) if delta_phi > 0 (j leads i)
-    delta_w = -A- * e^(delta_phi / tau-)     if delta_phi <= 0 (i leads j)
+    Apply PTDP in-place to network.weights using CSR layout.
+
+    Args:
+      network: LeviathanNetwork (provides row_ptr, col_idx, weights, phi, DA)
+      delayed_phi_edge: (E,) tensor — delayed source phase per edge,
+                         as returned by network.step() / network._get_delayed_phi_per_edge()
     """
-    N = weights.shape[0]
-    
-    # delayed_phi[dst, src] is phi_src(t - tau)
-    # current_phi[dst] is phi_dst(t)
-    
-    current_phi_matrix = current_phi.unsqueeze(1).expand(N, N)
-    
-    # Delta Phase: Does the signal from j arrive BEFORE i fires?
-    # To simplify continuous phase, we look at the raw difference mod 2pi
-    # But for PTDP causality, we want to know relative lead/lag.
-    # An approximation for continuous:
-    # If sin(delayed_phi - current_phi) > 0, delayed_phi is "ahead" in the cycle.
-    
-    # Let's use the explicit delta from the spec:
-    delta_phi = delayed_phi - current_phi_matrix
-    
-    # Map to [-pi, pi]
-    delta_phi = (delta_phi + torch.pi) % (2.0 * torch.pi) - torch.pi
-    
-    # Positive delta (j leads i)
-    mask_pos = (delta_phi > 0).float()
-    dw_pos = mask_pos * dopamine * A_PLUS * torch.exp(-delta_phi / TAU_PLUS)
-    
-    # Negative delta (i leads j)
-    mask_neg = (delta_phi <= 0).float()
-    dw_neg = mask_neg * -A_MINUS * torch.exp(delta_phi / TAU_MINUS) # delta_phi is negative, so exp(neg)
-    
-    delta_w = (dw_pos + dw_neg) * DT
-    
-    # Update only existing weights (topology is fixed, only strengths change)
-    active_synapses = (weights > 0).float()
-    weights += delta_w * active_synapses
-    
-    # Clamp weights > 0
-    weights.clamp_(min=0.0)
-    
-    # Homeostatic Normalization
-    # Sum of incoming weights to node i cannot exceed SYNAPTIC_W_MAX
-    incoming_sum = weights.sum(dim=1, keepdim=True)
-    
-    # Avoid div by zero
-    incoming_sum[incoming_sum == 0] = 1.0
-    
-    # Find nodes exceeding max
-    scale_factor = SYNAPTIC_W_MAX / incoming_sum
-    scale_factor = torch.clamp(scale_factor, max=1.0) # Only scale down, don't scale up
-    
-    weights *= scale_factor
-    
-    return weights
+    N = network.num_nodes
+    da = float(network.DA)
+
+    for dst in range(N):
+        start = int(network.row_ptr[dst])
+        end = int(network.row_ptr[dst + 1])
+        if end == start:
+            continue
+
+        # Δφ = φ_src(t - τ) - φ_dst(t), wrapped to [-π, π]
+        phi_del = delayed_phi_edge[start:end]  # (deg,)
+        phi_dst = network.phi[dst]
+        delta = phi_del - phi_dst
+        delta = torch.atan2(torch.sin(delta), torch.cos(delta))
+
+        pos = delta > 0  # j leads i → potentiate
+        neg = ~pos  # i leads j → depress
+
+        w = network.weights[start:end]
+
+        # LTP
+        if pos.any():
+            w[pos] += da * ETA_PLUS * torch.exp(-delta[pos] / TAU_PLUS)
+
+        # LTD (delta is negative here, exp receives positive value)
+        if neg.any():
+            w[neg] -= ETA_MINUS * torch.exp(delta[neg] / TAU_MINUS)
+
+        # Clamp: weights ≥ 0
+        w.clamp_(min=0.0)
+
+        # Homeostatic normalization — row sum must not exceed SYNAPTIC_W_MAX
+        row_sum = w.sum()
+        if row_sum > SYNAPTIC_W_MAX:
+            w *= SYNAPTIC_W_MAX / row_sum
+
+        network.weights[start:end] = w

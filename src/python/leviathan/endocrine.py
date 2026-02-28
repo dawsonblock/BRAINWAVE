@@ -23,35 +23,27 @@ from .config import (
 
 def update_metabolism(network: LeviathanNetwork):
     """
-    Drains ATP based on the cost equation. Prunes highly expensive synapses when near death.
+    Drains ATP based on the cost equation. Prunes expensive synapses when starving.
+    ATP cost:  dE/dt = -(R_basal + k_cost * |phi_dot| + k_maint * sum_of_all_weights/N)
     """
-    # ATP Cost Equation
-    # dE/dt = -(R_basal + k_cost * |phi_dot| + k_maint * sum(W_incoming))
-
     velocity_cost = K_COST * torch.abs(network.phi_dot)
-    synaptic_cost = K_MAINT * network.weights.sum(dim=1)
+
+    # CSR: network.weights is 1D (E,).  Approximate per-node maintenance cost
+    # as global_mean_weight (avoids per-row sum which requires row_ptr iteration).
+    # For exact per-node cost, use prune_weakest_starving() below.
+    mean_weight = network.weights.mean().item() if network.weights.numel() > 0 else 0.0
+    synaptic_cost = torch.full((network.num_nodes,), K_MAINT * mean_weight)
 
     drain = (R_BASAL + velocity_cost + synaptic_cost) * DT
-
     network.atp -= drain
 
-    # Check for metabolic death/pruning
-    # If a node's ATP drops below 0, we prune its weakest incoming synapse
-    # to reduce its `k_maint` cost.
+    # Starving nodes: emergency ATP + prune weakest incoming synapse
     starving_nodes = torch.where(network.atp <= ATP_DEATH_THRESHOLD)[0]
-
     for i in starving_nodes:
-        # Give it a small emergency ATP boost to survive the tick
         network.atp[i] = 10.0
 
-        # Find weakest non-zero synapse
-        incoming_w = network.weights[i, :]
-        active_idx = torch.where(incoming_w > 0)[0]
-
-        if len(active_idx) > 0:
-            weakest_idx = active_idx[torch.argmin(incoming_w[active_idx])]
-            # Prune it (set to 0 permanently)
-            network.weights[i, weakest_idx] = 0.0
+    # Delegate CSR-aware pruning to the network
+    network.prune_weakest_starving()
 
 
 def update_neuromodulators(network: LeviathanNetwork):
