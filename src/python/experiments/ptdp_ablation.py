@@ -59,7 +59,7 @@ def run_agent(ptdp_enabled: bool, seed: int):
         if ptdp_enabled:
             from leviathan.plasticity import apply_ptdp
 
-            apply_ptdp(brain.weights, brain.phi, delayed, brain.DA)
+            apply_ptdp(brain, delayed)
 
         update_metabolism(brain)
         update_neuromodulators(brain)

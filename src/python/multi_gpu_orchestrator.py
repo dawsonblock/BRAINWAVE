@@ -12,22 +12,24 @@ Strategy:
   - Stream overlap: compute internal blocks while comm exchanges halo
 """
 
-# NOTE: Full deterministic multi-GPU execution requires:
-#   1. Identical CSR partitioning
-#   2. NCCL for AllGather of halo phases
-#   3. Stream synchronization between compute and comm streams
-
+import os
 import torch
 import torch.multiprocessing as mp
 
-
-NCCL_AVAILABLE = False
+DIST_AVAILABLE = False
 try:
     import torch.distributed as dist
 
-    NCCL_AVAILABLE = True
+    DIST_AVAILABLE = dist.is_available()
 except ImportError:
     pass
+
+# NCCL is typically only available on Linux with CUDA
+NCCL_AVAILABLE = (
+    DIST_AVAILABLE
+    and torch.cuda.is_available()
+    and getattr(dist, "is_nccl_available", lambda: False)()
+)
 
 
 def _partition_csr(
@@ -79,9 +81,23 @@ def _worker(rank: int, world_size: int, shared_data: dict, result_queue):
       3. AllGather halo phases via NCCL after each tick
       4. Update halo buffer and continue
     """
-    if NCCL_AVAILABLE:
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
-        device = torch.device(f"cuda:{rank}")
+    if world_size > 1 and DIST_AVAILABLE:
+        # Default env for local rendezvous if not set
+        if "MASTER_ADDR" not in os.environ:
+            os.environ["MASTER_ADDR"] = "127.0.0.1"
+        if "MASTER_PORT" not in os.environ:
+            os.environ["MASTER_PORT"] = "29500"
+
+        backend = "nccl" if NCCL_AVAILABLE else "gloo"
+        try:
+            dist.init_process_group(backend, rank=rank, world_size=world_size)
+            if NCCL_AVAILABLE:
+                device = torch.device(f"cuda:{rank}")
+            else:
+                device = torch.device("cpu")
+        except Exception as e:
+            print(f"[multi_gpu] Rank {rank} failed to init {backend}: {e}")
+            device = torch.device("cpu")
     else:
         device = torch.device("cpu")
 
@@ -105,14 +121,14 @@ def _worker(rank: int, world_size: int, shared_data: dict, result_queue):
         phase = phase + 0.01 * torch.randn_like(phase)
 
         # ── HALO EXCHANGE via AllGather ─────────────────────────────────
-        if NCCL_AVAILABLE:
+        if world_size > 1 and DIST_AVAILABLE and dist.is_initialized():
             all_phases = [torch.zeros_like(phase) for _ in range(world_size)]
             dist.all_gather(all_phases, phase)
             # Update halo buffer from all_phases here
 
     result_queue.put({"rank": rank, "final_phase_mean": float(phase.mean())})
 
-    if NCCL_AVAILABLE:
+    if DIST_AVAILABLE and dist.is_initialized():
         dist.destroy_process_group()
 
 

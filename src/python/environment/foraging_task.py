@@ -7,6 +7,7 @@ Separates task definition from network implementation.
 
 import torch
 import numpy as np
+from typing import Optional
 
 
 class ForagingTask:
@@ -17,7 +18,7 @@ class ForagingTask:
     """
 
     def __init__(
-        self, arena_size: float = 10.0, n_food: int = 20, seed: int | None = None
+        self, arena_size: float = 10.0, n_food: int = 20, seed: Optional[int] = None
     ):
         self.arena_size = arena_size
         self.n_food = n_food
