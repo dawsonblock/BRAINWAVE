@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Leviathan v2.0 — Live Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0d0d0d;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex; flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 18px;
+    }
+    h1 { font-size: 1.4rem; letter-spacing: 2px; color: #00e5ff; margin-bottom: 14px; }
+    #layout {
+      display: flex; gap: 20px;
+      flex-wrap: wrap; justify-content: center;
+    }
+
+    /* Arena canvas */
+    canvas#arena {
+      border: 1px solid #333;
+      border-radius: 6px;
+      background: #111122;
+    }
+
+    /* Telemetry panel */
+    #telemetry {
+      display: flex; flex-direction: column; gap: 12px;
+      min-width: 220px;
+    }
+    .meter-block { display: flex; flex-direction: column; gap: 4px; }
+    .meter-label { font-size: 0.75rem; color: #888; letter-spacing: 1px; }
+    .meter-value { font-size: 1.5rem; font-weight: 700; }
+    .meter-bar-bg {
+      height: 10px; border-radius: 5px;
+      background: #1e1e30;
+    }
+    .meter-bar {
+      height: 100%; border-radius: 5px;
+      transition: width 0.08s linear;
+    }
+
+    #status-bar {
+      margin-top: 10px; font-size: 0.8rem; color: #555;
+      width: 100%; text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>⚡ LEVIATHAN v2.0 — REAL-TIME SIMULATION</h1>
+
+  <div id="layout">
+    <canvas id="arena" width="800" height="600"></canvas>
+
+    <div id="telemetry">
+      <div class="meter-block">
+        <div class="meter-label">TICK</div>
+        <div class="meter-value" id="val-tick" style="color:#7e57c2">0</div>
+      </div>
+      <div class="meter-block">
+        <div class="meter-label">FOOD EATEN</div>
+        <div class="meter-value" id="val-food" style="color:#aed581">0</div>
+      </div>
+
+      <div class="meter-block">
+        <div class="meter-label">ATP (ENERGY)</div>
+        <div class="meter-value" id="val-atp" style="color:#00e5ff">1000</div>
+        <div class="meter-bar-bg"><div class="meter-bar" id="bar-atp" style="background:#00e5ff; width:100%"></div></div>
+      </div>
+
+      <div class="meter-block">
+        <div class="meter-label">DOPAMINE (DA)</div>
+        <div class="meter-value" id="val-da" style="color:#ff6f00">1.00</div>
+        <div class="meter-bar-bg"><div class="meter-bar" id="bar-da" style="background:#ff6f00; width:10%"></div></div>
+      </div>
+
+      <div class="meter-block">
+        <div class="meter-label">NORADRENALINE (NA)</div>
+        <div class="meter-value" id="val-na" style="color:#b39ddb">0.10</div>
+        <div class="meter-bar-bg"><div class="meter-bar" id="bar-na" style="background:#b39ddb; width:2%"></div></div>
+      </div>
+
+      <div class="meter-block">
+        <div class="meter-label">SEROTONIN (SER)</div>
+        <div class="meter-value" id="val-ser" style="color:#69f0ae">1.00</div>
+        <div class="meter-bar-bg"><div class="meter-bar" id="bar-ser" style="background:#69f0ae; width:20%"></div></div>
+      </div>
+
+      <div class="meter-block">
+        <div class="meter-label">ACETYLCHOLINE (ACH)</div>
+        <div class="meter-value" id="val-ach" style="color:#ffd740">1.00</div>
+        <div class="meter-bar-bg"><div class="meter-bar" id="bar-ach" style="background:#ffd740; width:20%"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="status-bar">Connecting to Leviathan simulation server…</div>
+
+<script>
+const canvas = document.getElementById('arena');
+const ctx    = canvas.getContext('2d');
+const STATUS = document.getElementById('status-bar');
+
+const ARENA_W = 800, ARENA_H = 600;
+
+// Telemetry helpers
+function setVal(id, v)   { document.getElementById(id).textContent = v; }
+function setBar(id, pct) { document.getElementById(id).style.width = Math.min(100, Math.max(0, pct)) + '%'; }
+
+// Trail for the agent path
+const TRAIL_LEN = 60;
+const trail = [];
+
+function drawFrame(state) {
+  ctx.clearRect(0, 0, ARENA_W, ARENA_H);
+
+  // Background
+  ctx.fillStyle = '#111122';
+  ctx.fillRect(0, 0, ARENA_W, ARENA_H);
+
+  // Grid subtle
+  ctx.strokeStyle = '#1a1a2e'; ctx.lineWidth = 1;
+  for (let gx = 0; gx < ARENA_W; gx += 80) { ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx, ARENA_H); ctx.stroke(); }
+  for (let gy = 0; gy < ARENA_H; gy += 80) { ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(ARENA_W, gy); ctx.stroke(); }
+
+  // Walls (8D)
+  ctx.fillStyle = '#37474f';
+  for (const w of state.walls) {
+    ctx.fillRect(w.x, w.y, w.w, w.h);
+    ctx.strokeStyle = '#546e7a'; ctx.lineWidth = 1;
+    ctx.strokeRect(w.x, w.y, w.w, w.h);
+  }
+
+  // Food dots
+  for (const f of state.foods) {
+    const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, 10);
+    grad.addColorStop(0, '#aed581');
+    grad.addColorStop(1, 'rgba(174,213,129,0)');
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, 10, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+
+  // Trail
+  const a = state.agent;
+  trail.push({x: a.x, y: a.y});
+  if (trail.length > TRAIL_LEN) trail.shift();
+  for (let t = 1; t < trail.length; t++) {
+    const alpha = t / trail.length;
+    ctx.beginPath();
+    ctx.moveTo(trail[t-1].x, trail[t-1].y);
+    ctx.lineTo(trail[t].x,   trail[t].y);
+    ctx.strokeStyle = `rgba(100,120,255,${alpha * 0.8})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Agent body glow
+  const glowGrad = ctx.createRadialGradient(a.x, a.y, 0, a.x, a.y, a.r * 2.5);
+  glowGrad.addColorStop(0, 'rgba(0,229,255,0.25)');
+  glowGrad.addColorStop(1, 'rgba(0,229,255,0)');
+  ctx.beginPath();
+  ctx.arc(a.x, a.y, a.r * 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = glowGrad; ctx.fill();
+
+  // Agent body
+  ctx.beginPath();
+  ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2);
+  ctx.fillStyle   = '#0d47a1';
+  ctx.strokeStyle = '#00e5ff';
+  ctx.lineWidth   = 2.5;
+  ctx.fill(); ctx.stroke();
+
+  // Heading arrow
+  const AL = a.r * 1.7;
+  const tipX = a.x + Math.cos(a.h) * AL;
+  const tipY = a.y + Math.sin(a.h) * AL;
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(tipX, tipY);
+  ctx.strokeStyle = '#ffd740'; ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Tick + food overlay
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '11px monospace';
+  ctx.fillText(`tick ${state.tick}  |  eaten ${state.total_food}`, 8, 16);
+
+  // Update telemetry panel
+  const s = state.stats;
+  const ATP_MAX = 5000;
+  setVal('val-tick',  state.tick);
+  setVal('val-food',  state.total_food);
+  setVal('val-atp',   s.atp.toFixed(0));  setBar('bar-atp', s.atp / ATP_MAX * 100);
+  setVal('val-da',    s.da.toFixed(2));   setBar('bar-da',  s.da  / 10  * 100);
+  setVal('val-na',    s.na.toFixed(3));   setBar('bar-na',  s.na  /  5  * 100);
+  setVal('val-ser',   s.ser.toFixed(3));  setBar('bar-ser', s.ser /  5  * 100);
+  setVal('val-ach',   s.ach.toFixed(3));  setBar('bar-ach', s.ach /  5  * 100);
+}
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen  = () => { STATUS.textContent = '● Connected — simulation running'; STATUS.style.color = '#aed581'; };
+  ws.onclose = () => { STATUS.textContent = '○ Disconnected — retrying…'; STATUS.style.color = '#ef5350'; setTimeout(connect, 2000); };
+  ws.onerror = (e) => console.error('WS error', e);
+  ws.onmessage = (e) => {
+    try { drawFrame(JSON.parse(e.data)); } catch (err) { console.error(err); }
+  };
+}
+connect();
+</script>
+</body>
+</html>

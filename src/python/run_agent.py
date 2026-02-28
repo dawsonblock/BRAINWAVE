@@ -6,10 +6,11 @@ from leviathan.motor import MotorDecoder
 from leviathan.endocrine import update_metabolism, update_neuromodulators
 from leviathan.config import DA_REWARD_SPIKE, ATP_FOOD_REWARD
 
-# Sensory forcing strength (drives Thalamus nodes toward food)
 SENSORY_GAIN = 80.0
 # Motor gain converts raw phase velocity sum into arena-scale torque values
 MOTOR_GAIN = 10.0
+# Wall danger raycasts are dampened relative to food
+WALL_GAIN = 48.0
 
 
 def run_agent_simulation(ticks=3000):
@@ -27,6 +28,7 @@ def run_agent_simulation(ticks=3000):
 
     # 2. Setup Body/Environment
     arena = Arena(width=800, height=600, num_foods=20)
+    arena.add_default_obstacles()  # 8D: add interior wall obstacles
 
     # Logging
     history = {
@@ -45,16 +47,20 @@ def run_agent_simulation(ticks=3000):
     for tick in range(ticks):
 
         # ---- SENSORY PHASE ----
-        # 5 raycasts forward from the agent's heading
-        proximities = arena.get_sensory_raycasts(
+        # Dual-channel raycasts: food proximity + wall danger
+        food_prox, wall_prox = arena.get_sensory_raycasts(
             num_rays=5, fov_deg=120, max_dist=250.0
         )
 
-        # Build external_sensory_input tensor (N,): zeros except Thalamus sensor nodes
-        # We model each Thalamus node amplitude as SENSORY_GAIN * proximity
+        # Thalamus nodes 0-4: food proximity (approach bias)
+        # Thalamus nodes 5-9: wall proximity (avoidance signal)
         s_input = torch.zeros(num_nodes)
-        for i, prox in enumerate(proximities):
+        for i, prox in enumerate(food_prox):
             s_input[sensor_indices[i]] = SENSORY_GAIN * float(prox)
+        wall_indices = list(range(5, 10))
+        for i, prox in enumerate(wall_prox):
+            if wall_indices[i] < num_nodes:
+                s_input[wall_indices[i]] = WALL_GAIN * float(prox)
 
         # ---- COGNITIVE PHASE ----
         brain.step(external_sensory_input=s_input)
