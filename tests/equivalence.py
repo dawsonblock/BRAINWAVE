@@ -13,6 +13,8 @@ Run:
 
 import sys
 import math
+import random
+import numpy as np
 import torch
 
 sys.path.insert(0, "src/python")
@@ -27,8 +29,15 @@ SEED = 42
 V_MAX = 50.0  # must match network.V_MAX
 
 
-def run_sim(seed: int, ptdp: bool = True):
+def _seed_all(seed: int):
+    """Seed everything that topology.py / network.py uses."""
     torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def run_sim(seed: int, ptdp: bool = True):
+    _seed_all(seed)
     net = LeviathanNetwork(N)
     sensory = torch.zeros(N)
 

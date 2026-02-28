@@ -1,0 +1,41 @@
+[project]
+name = "leviathan"
+version = "2.1.0"
+description = "Leviathan v2.0: Sparse oscillator AGI research platform"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.24",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "websockets>=12.0",
+    "plotly>=5.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+leviathan-run    = "leviathan.run_agent:main"
+leviathan-render = "leviathan.render_agent:main"
+
+[build-system]
+requires      = ["setuptools>=70"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = ["src/python"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths   = ["tests"]
+pythonpath  = ["src/python"]

@@ -23,26 +23,25 @@ from .config import (
 
 def update_metabolism(network: LeviathanNetwork):
     """
-    Drains ATP based on the cost equation. Prunes expensive synapses when starving.
-    ATP cost:  dE/dt = -(R_basal + k_cost * |phi_dot| + k_maint * sum_of_all_weights/N)
+    Drains ATP based on the cost equation.
+    Maintenance cost is now computed per-row from CSR (consistent with pruning).
+    dE_i/dt = -(R_basal + k_cost * |phi_dot_i| + k_maint * sum_incoming_weights_i)
     """
     velocity_cost = K_COST * torch.abs(network.phi_dot)
 
-    # CSR: network.weights is 1D (E,).  Approximate per-node maintenance cost
-    # as global_mean_weight (avoids per-row sum which requires row_ptr iteration).
-    # For exact per-node cost, use prune_weakest_starving() below.
-    mean_weight = network.weights.mean().item() if network.weights.numel() > 0 else 0.0
-    synaptic_cost = torch.full((network.num_nodes,), K_MAINT * mean_weight)
+    # Per-node incoming weight sum via scatter_add over CSR edges (O(E), exact)
+    row_w_sum = torch.zeros(network.num_nodes, device=network.weights.device)
+    row_w_sum.scatter_add_(0, network.dst_idx, network.weights)
+    synaptic_cost = K_MAINT * row_w_sum
 
     drain = (R_BASAL + velocity_cost + synaptic_cost) * DT
     network.atp -= drain
 
-    # Starving nodes: emergency ATP + prune weakest incoming synapse
-    starving_nodes = torch.where(network.atp <= ATP_DEATH_THRESHOLD)[0]
-    for i in starving_nodes:
+    # Starving nodes: emergency ATP boost, then CSR-aware pruning
+    starving = torch.where(network.atp <= ATP_DEATH_THRESHOLD)[0]
+    for i in starving:
         network.atp[i] = 10.0
 
-    # Delegate CSR-aware pruning to the network
     network.prune_weakest_starving()
 
 

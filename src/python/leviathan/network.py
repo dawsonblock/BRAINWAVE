@@ -50,6 +50,10 @@ class LeviathanNetwork:
             build_csr_topology(self.positions, self.region_labels)
         )
 
+        # ── Precomputed dst_idx for vectorized coupling ─────────────────
+        # dst_idx[e] = destination node of edge e (expanded from row_ptr)
+        self.dst_idx = self._build_dst_idx()
+
         # ── ATP Economy ────────────────────────────────────────────────
         self.atp = torch.ones(num_nodes) * INITIAL_ATP
 
@@ -78,30 +82,34 @@ class LeviathanNetwork:
         self.ACH = 1.0  # Acetylcholine (inertia reduction — cortex)
 
     # ─────────────────────────────────────────────────────────────────────
+    def _build_dst_idx(self) -> torch.Tensor:
+        """Expand row_ptr into per-edge destination indices (precomputed once)."""
+        N, E = self.num_nodes, self.col_idx.shape[0]
+        dst = torch.zeros(E, dtype=torch.long)
+        for i in range(N):
+            s, e = int(self.row_ptr[i]), int(self.row_ptr[i + 1])
+            dst[s:e] = i
+        return dst
+
+    # ─────────────────────────────────────────────────────────────────────
     def _sparse_coupling(self) -> torch.Tensor:
         """
-        Compute coupling[dst] = SER * Σ_src W_edge * sin(φ_src(t-τ) - φ_dst)
-        Complexity: O(E)  — no NxN matrix allocated.
+        Fully vectorized sparse coupling via scatter_add — no Python loop.
+        Complexity: O(E)  — single pass over all edges.
         """
-        N = self.num_nodes
         hist = self.current_tick % MAX_DELAY_TICKS
-        coupling = torch.zeros(N)
+        srcs = self.col_idx.long()  # (E,) source nodes
+        dsts = self.dst_idx  # (E,) destination nodes
+        delays = self.delay_ticks.long()  # (E,) per-edge delay
 
-        for dst in range(N):
-            start = int(self.row_ptr[dst])
-            end = int(self.row_ptr[dst + 1])
-            if end == start:
-                continue
+        slots = (hist - delays) % MAX_DELAY_TICKS  # (E,)
+        phi_del = self.history_phi[slots, srcs]  # (E,)
+        phi_dst = self.phi[dsts]  # (E,)
 
-            srcs = self.col_idx[start:end]  # (deg,)
-            delays = self.delay_ticks[start:end]  # (deg,)
-            wts = self.weights[start:end]  # (deg,)
+        edge_contrib = self.weights * torch.sin(phi_del - phi_dst)  # (E,)
 
-            # Pull delayed phase for each source — O(deg) random access
-            slots = (hist - delays) % MAX_DELAY_TICKS  # (deg,)
-            phi_del = self.history_phi[slots, srcs]  # (deg,)
-
-            coupling[dst] = torch.sum(wts * torch.sin(phi_del - self.phi[dst]))
+        coupling = torch.zeros(self.num_nodes)
+        coupling.scatter_add_(0, dsts, edge_contrib)  # O(E)
 
         return self.SER * coupling
 
