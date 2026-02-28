@@ -19,17 +19,30 @@ TAU_PLUS = 0.05  # LTP time constant
 TAU_MINUS = 0.05  # LTD time constant
 
 # Dynamic Endocrine Constants
-TAU_DA = 2.0  # Dopamine half-life
-TAU_NA = 1.0  # Noradrenaline half-life
-TAU_SER = 5.0  # Serotonin half-life
-TAU_ACH = 0.5  # Acetylcholine half-life
-
+TAU_DA = 5.0  # Dopamine (DA) - Exploration & Reward
 ALPHA_DA = 0.5
-ALPHA_NA = 1.0
-ALPHA_SER = 0.1
-ALPHA_ACH = 2.0
+DA_BASAL = 0.1
 
+# Noradrenaline (NA) - Arousal & Novelty
+TAU_NA = 3.0
+ALPHA_NA = 0.8
 NA_BASAL = 0.1
+NOVELTY_THRESHOLD = 2.0
+
+# Serotonin (SER) - Stability & Coupling Strength
+TAU_SER = 10.0
+ALPHA_SER = 0.3
+SER_BASAL = 1.0
+
+# Acetylcholine (ACH) - Attention & Signal Relay
+TAU_ACH = 2.0
+ALPHA_ACH = 0.6
+ACH_BASAL = 0.5
+
+# --- EMBODIED ENVIRONMENT (PHASE 7) ---
+ATP_FOOD_REWARD = 500.0
+DA_REWARD_SPIKE = 2.00
+
 ATP_TARGET = 800.0
 THETA_NOVEL = 5.0  # rad/s threshold for novelty detection
 
