@@ -87,3 +87,9 @@ def update_neuromodulators(network: LeviathanNetwork):
     ach_drive = ALPHA_ACH * max(0.0, mean_velocity - THETA_NOVEL)
     dACH = (-(network.ACH - 1.0) / TAU_ACH + ach_drive) * DT
     network.ACH = max(0.1, network.ACH + dACH)  # Cannot drive inertia effectively to 0
+
+    # Clamp all neuromodulators to biologically plausible range
+    network.DA = min(max(network.DA, 0.0), 10.0)
+    network.NA = min(max(network.NA, 0.0), 5.0)
+    network.SER = min(max(network.SER, 0.1), 5.0)
+    network.ACH = min(max(network.ACH, 0.1), 5.0)

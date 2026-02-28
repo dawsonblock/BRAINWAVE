@@ -6,82 +6,99 @@ from leviathan.motor import MotorDecoder
 from leviathan.endocrine import update_metabolism, update_neuromodulators
 from leviathan.config import DA_REWARD_SPIKE, ATP_FOOD_REWARD
 
+# Sensory forcing strength (drives Thalamus nodes toward food)
+SENSORY_GAIN = 80.0
+# Motor gain converts raw phase velocity sum into arena-scale torque values
+MOTOR_GAIN = 10.0
 
-def run_agent_simulation(ticks=1000):
+
+def run_agent_simulation(ticks=3000):
     print("Initializing Leviathan v2.0 Agent Simulation...")
 
     # 1. Setup Brain
     num_nodes = 200
     brain = LeviathanNetwork(num_nodes)
 
-    # Define dedicated node roles based on spec
-    # 5 Raycast Sensors -> Thalamus (say nodes 0 to 4)
-    sensor_indices = [0, 1, 2, 3, 4]
+    # 5 Raycast Sensors -> Thalamus nodes 0-4
+    sensor_indices = list(range(5))
 
-    # 2 Motor outputs -> Cerebellum
+    # MotorDecoder reads Cerebellum region labels from the brain
     motor_decoder = MotorDecoder(network=brain)
 
     # 2. Setup Body/Environment
-    arena = Arena(width=800, height=600, num_foods=15)
+    arena = Arena(width=800, height=600, num_foods=20)
 
     # Logging
-    history = {"x": [], "y": [], "atp": [], "da": [], "foods_eaten": 0}
+    history = {
+        "x": [],
+        "y": [],
+        "heading": [],
+        "atp": [],
+        "da": [],
+        "na": [],
+        "torque_l": [],
+        "torque_r": [],
+        "foods_eaten": 0,
+    }
 
     print(f"Starting simulation for {ticks} ticks...")
     for tick in range(ticks):
 
-        # --- SENSORY PHASE ---
-        # 1. Get raycasts from environment [5]
-        proximities = arena.get_sensory_raycasts(num_rays=5, fov_deg=120)
+        # ---- SENSORY PHASE ----
+        # 5 raycasts forward from the agent's heading
+        proximities = arena.get_sensory_raycasts(
+            num_rays=5, fov_deg=120, max_dist=250.0
+        )
 
-        # 2. Map to Thalamus Input Forcing S_i(t)
-        # S_i(t) = I_0 / d * sin(theta - phi_i)
-        # Simplified: Inject raw proximity into the acceleration term
+        # Build external_sensory_input tensor (N,): zeros except Thalamus sensor nodes
+        # We model each Thalamus node amplitude as SENSORY_GAIN * proximity
+        s_input = torch.zeros(num_nodes)
         for i, prox in enumerate(proximities):
-            node_idx = sensor_indices[i]
-            # Boost the sensory impact
-            brain.phi_dot[node_idx] += prox * 50.0
+            s_input[sensor_indices[i]] = SENSORY_GAIN * float(prox)
 
-        # --- COGNITIVE PHASE ---
-        # 3. Step the Brain Physics (Integration, PTDP, etc)
-        brain.step()
+        # ---- COGNITIVE PHASE ----
+        brain.step(external_sensory_input=s_input)
         update_metabolism(brain)
-
-        # Calculate error for neuromodulators (simplified task error: are we moving?)
-        avg_velocity = torch.mean(torch.abs(brain.phi_dot)).item()
-        error = 1.0 / (avg_velocity + 0.1)
-
         update_neuromodulators(brain)
 
-        # --- MOTOR PHASE ---
-        # 4. Decode motors from Cerebellum
-        torque_l, torque_r = motor_decoder.decode_torque()
+        # ---- MOTOR PHASE ----
+        raw_l, raw_r = motor_decoder.decode_torque()
 
-        # 5. Move body in environment
+        # Adaptive motor gain: scale so that a typical phi_dot sum (~5-20 rad/s)
+        # maps to a useful arena displacement per tick.
+        # We also add a small forward bias so the agent explores even early on.
+        torque_l = raw_l * MOTOR_GAIN + 2.0
+        torque_r = raw_r * MOTOR_GAIN + 2.0
+
         foods_eaten = arena.move_agent(torque_l, torque_r)
 
-        # --- REWARD PHASE ---
+        # ---- REWARD PHASE ----
         if foods_eaten > 0:
             history["foods_eaten"] += foods_eaten
-            # Phase 7 embodied rewards: Food -> ATP & DA
             brain.atp += ATP_FOOD_REWARD * foods_eaten
-            brain.DA += DA_REWARD_SPIKE * foods_eaten
+            brain.DA = min(brain.DA + DA_REWARD_SPIKE * foods_eaten, 10.0)
             print(
-                f"Tick {tick}: Found Food! ATP: {brain.atp.mean().item():.1f}, DA: {brain.DA:.2f}"
+                f"  [Tick {tick:>5}] Ate food! ATP={brain.atp.mean().item():.1f}  "
+                f"DA={brain.DA:.2f}  pos=({arena.agent_x:.0f},{arena.agent_y:.0f})"
             )
 
-        # --- LOGGING ---
-        if tick % 50 == 0:
+        # ---- LOGGING (every 30 ticks) ----
+        if tick % 30 == 0:
             history["x"].append(arena.agent_x)
             history["y"].append(arena.agent_y)
+            history["heading"].append(arena.agent_heading)
             history["atp"].append(brain.atp.mean().item())
             history["da"].append(brain.DA)
+            history["na"].append(brain.NA)
+            history["torque_l"].append(torque_l)
+            history["torque_r"].append(torque_r)
 
-    print(f"\nSimulation Complete. Total Food Eaten: {history['foods_eaten']}")
-    print(f"Final Average ATP: {history['atp'][-1]:.1f}")
+    print("\nSimulation Complete.")
+    print(f"  Total Food Eaten : {history['foods_eaten']}")
+    print(f"  Final Avg ATP    : {history['atp'][-1]:.1f}")
+    print(f"  Final DA         : {history['da'][-1]:.3f}")
 
-    # Save trajectory for potential visualization later
-    np.save("agent_trajectory.npy", {"x": history["x"], "y": history["y"]})
+    np.save("agent_trajectory.npy", history)
     print("Saved agent trajectory to agent_trajectory.npy")
 
 

@@ -16,7 +16,7 @@ class Arena:
 
         # Food targets
         self.foods = []
-        self.food_radius = 5.0
+        self.food_radius = 12.0  # larger for easier collision
         for _ in range(num_foods):
             self.spawn_food()
 
@@ -26,36 +26,28 @@ class Arena:
         y = random.uniform(self.food_radius, self.height - self.food_radius)
         self.foods.append((x, y))
 
-    def move_agent(self, torque_left, torque_right, dt=0.01):
+    def move_agent(self, torque_left, torque_right):
         """
         Updates agent kinematics based on tank-drive torques.
-        Returns amount of food eaten (ATP reward).
+        Torque values are treated as wheel velocities in px/step.
+        Returns count of food items eaten this step.
         """
-        # Differential drive kinematics
-        # v = (v_r + v_l) / 2
-        # w = (v_r - v_l) / L  (L = axle length, let's say 20)
-
-        L = 20.0
-        # Convert torque to velocity simply (ignoring mass for now)
-        v_l = float(torque_left) * 0.1
-        v_r = float(torque_right) * 0.1
+        L = 30.0  # axle width in pixels
+        v_l = float(torque_left)
+        v_r = float(torque_right)
 
         v = (v_r + v_l) / 2.0
         w = (v_r - v_l) / L
 
-        self.agent_heading += w * dt
+        self.agent_heading += w
         self.agent_heading = self.agent_heading % (2 * math.pi)
 
-        self.agent_x += v * math.cos(self.agent_heading) * dt
-        self.agent_y += v * math.sin(self.agent_heading) * dt
+        self.agent_x += v * math.cos(self.agent_heading)
+        self.agent_y += v * math.sin(self.agent_heading)
 
-        # Boundary constraints
-        self.agent_x = max(
-            self.agent_radius, min(self.width - self.agent_radius, self.agent_x)
-        )
-        self.agent_y = max(
-            self.agent_radius, min(self.height - self.agent_radius, self.agent_y)
-        )
+        # Boundary wrap (keeps agent in arena)
+        self.agent_x = self.agent_x % self.width
+        self.agent_y = self.agent_y % self.height
 
         return self.check_collisions()
 
