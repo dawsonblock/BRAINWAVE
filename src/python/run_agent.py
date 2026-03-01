@@ -38,10 +38,16 @@ def run_agent_simulation(ticks=3000):
         "atp": [],
         "da": [],
         "na": [],
+        "ser": [],
+        "ach": [],
+        "entropy": [],
         "torque_l": [],
         "torque_r": [],
         "foods_eaten": 0,
+        "replay_buffer": [],  # Store (phi_dot, target_vec) on reward
     }
+    # Track baseline ATP
+    start_atp = float(brain.atp.sum())
 
     print(f"Starting simulation for {ticks} ticks...")
     for tick in range(ticks):
@@ -67,10 +73,34 @@ def run_agent_simulation(ticks=3000):
 
         # ── Phase 12 Plasticity: PTDP + Active Inference Learning ─────
         if brain.current_tick > 10:
-            from leviathan.plasticity import apply_ptdp, apply_active_inf_learning
+            from leviathan.plasticity import (
+                apply_ptdp,
+                apply_active_inf_learning,
+                apply_synaptic_scaling,
+            )
 
             apply_ptdp(brain, delayed_phi)
             apply_active_inf_learning(brain, delayed_phi)
+            apply_synaptic_scaling(brain)
+
+            # ── Phase 14: Structural Plasticity & Memory ──
+            brain.synaptic_birth()
+
+            # Train LSM to predict relative food proximity
+            # We use the current arena state as target
+            if len(arena.foods) > 0:
+                # Find nearest food relative to agent
+                agent_p = np.array([arena.agent_x, arena.agent_y])
+                food_ps = np.array([[f[0], f[1]] for f in arena.foods])
+                diffs = food_ps - agent_p
+                dist_sq = np.sum(diffs**2, axis=1)
+                nearest_idx = np.argmin(dist_sq)
+                target_vec = (
+                    torch.tensor(diffs[nearest_idx], dtype=torch.float32) / 500.0
+                )
+
+                # Input for LSM is the current reservoir state (phi_dot)
+                brain.lsm_loss = brain.lsm.train_step(brain.phi_dot, target_vec)
 
         update_metabolism(brain)
         update_neuromodulators(brain)
@@ -109,9 +139,28 @@ def run_agent_simulation(ticks=3000):
             history["foods_eaten"] += foods_eaten
             brain.atp += ATP_FOOD_REWARD * foods_eaten
             brain.DA = min(brain.DA + DA_REWARD_SPIKE * foods_eaten, 10.0)
+
+            # ── Phase 14: Add to Replay Buffer ──
+            # Store the state-action-reward triplet (simplified)
+            history["replay_buffer"].append(
+                {
+                    "state": brain.phi_dot.clone(),
+                    "target": target_vec.clone() if "target_vec" in locals() else None,
+                }
+            )
             print(
                 f"  [Tick {tick:>5}] Ate food! ATP={brain.atp.mean().item():.1f}  "
                 f"DA={brain.DA:.2f}  pos=({arena.agent_x:.0f},{arena.agent_y:.0f})"
+            )
+
+        if tick % 50 == 0:
+            E = brain.weights.shape[0]
+            entropy = brain.cognitive_entropy
+            # Metabolic Efficiency: Foods eaten per 1000 units of ATP spent
+            # (Simplified proxy using total ATP / foods)
+            print(
+                f"  [Tick {tick:5d}] Lyap={brain.lyapunov_exponent:.3f} Ent={entropy:.3f} "
+                f"E={E} LSM_L={brain.lsm_loss:.4f} DA={brain.DA:.2f} SER={brain.SER:.2f}"
             )
 
         # ---- LOGGING (every 30 ticks) ----
@@ -122,13 +171,37 @@ def run_agent_simulation(ticks=3000):
             history["atp"].append(brain.atp.mean().item())
             history["da"].append(brain.DA)
             history["na"].append(brain.NA)
+            history["ser"].append(brain.SER)
+            history["ach"].append(brain.ACH)
+            history["entropy"].append(brain.cognitive_entropy)
             history["torque_l"].append(torque_l)
             history["torque_r"].append(torque_r)
+
+    # ---- OFFLINE REPLAY PHASE (Memory Consolidation) ----
+    if history["replay_buffer"]:
+        print(
+            f"\nStarting Offline Replay (Consolidating {len(history['replay_buffer'])} memories)..."
+        )
+        for i, memory in enumerate(history["replay_buffer"]):
+            state = memory["state"]
+            target = memory["target"]
+            if target is not None:
+                loss = brain.lsm.train_step(state, target)
+                if i % 10 == 0:
+                    print(f"  [Replay {i:>3}] LSM Consolidation Loss: {loss:.4f}")
 
     print("\nSimulation Complete.")
     print(f"  Total Food Eaten : {history['foods_eaten']}")
     print(f"  Final Avg ATP    : {history['atp'][-1]:.1f}")
-    print(f"  Final DA         : {history['da'][-1]:.3f}")
+    print(f"  Final Edge Count : {brain.weights.shape[0]}")
+    print(f"  Avg Degree       : {brain.weights.shape[0]/num_nodes:.2f}")
+
+    atp_spent = (
+        start_atp - float(brain.atp.sum()) + (history["foods_eaten"] * ATP_FOOD_REWARD)
+    )
+    efficiency = history["foods_eaten"] / (atp_spent / 1000.0 + 1e-6)
+    print(f"  Metabolic Eff    : {efficiency:.2f} foods/k-ATP")
+    print(f"  Final Entropy    : {history['entropy'][-1]:.3f}")
 
     np.save("agent_trajectory.npy", history)
     print("Saved agent trajectory to agent_trajectory.npy")

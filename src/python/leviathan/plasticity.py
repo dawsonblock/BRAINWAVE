@@ -35,12 +35,18 @@ def apply_ptdp(network, delayed_phi_edge: torch.Tensor):
     pos = delta > 0
     neg = ~pos
 
+    # Neuromodulatory Metamodulation: DA scales LTP (ETA_PLUS)
+    # High DA = high plasticity for rewarding trajectories.
+    # Low DA = stable weights.
+    effective_eta_plus = ETA_PLUS * da
+    effective_eta_minus = ETA_MINUS  # LTD stays relatively constant
+
     # Compute weight updates for ALL edges at once
     dw = torch.zeros_like(network.weights)
     if pos.any():
-        dw[pos] = da * ETA_PLUS * torch.exp(-delta[pos] / TAU_PLUS)
+        dw[pos] = effective_eta_plus * torch.exp(-delta[pos] / TAU_PLUS)
     if neg.any():
-        dw[neg] = -ETA_MINUS * torch.exp(delta[neg] / TAU_MINUS)
+        dw[neg] = -effective_eta_minus * torch.exp(delta[neg] / TAU_MINUS)
 
     network.weights.add_(dw)
     network.weights.clamp_(min=0.0)
@@ -71,9 +77,20 @@ def apply_active_inf_learning(network, delayed_phi_edge: torch.Tensor, lr=0.0001
     # E = 0.5 * error^2
     # dE/dw = error * d(phi - phi_target)/dw
     # In our simplified dynamics, dphi/dw ∝ sin(phi_src_del - phi_dst)
+    error_dst = network.error[network.dst_idx]
+    phi_dst = network.phi[network.dst_idx]
+
+    # Gradient of squared error w.r.t coupling:
+    # E = 0.5 * error^2
+    # dE/dw = error * d(phi - phi_target)/dw
+    # In our simplified dynamics, dphi/dw ∝ sin(phi_src_del - phi_dst)
     grad = error_dst * torch.sin(delayed_phi_edge - phi_dst)
 
-    dw = -lr * grad
+    # ACH scales the learning rate for prediction errors (attention-weighted learning)
+    ach = float(network.ACH)
+    effective_lr = lr * ach
+
+    dw = -effective_lr * grad
 
     # Dale's Principle Sign Enforcement
     pos_mask = (network.weights > 0).float()
@@ -84,3 +101,22 @@ def apply_active_inf_learning(network, delayed_phi_edge: torch.Tensor, lr=0.0001
     # Clamp based on original sign
     network.weights.mul_(pos_mask).clamp_(min=0.0)
     network.weights.add_(network.weights.mul_(neg_mask).clamp_(max=0.0))
+
+
+def apply_synaptic_scaling(network, target_atp=500.0, rate=0.001):
+    """
+    Homeostatic Synaptic Scaling: Scale all incoming weights to maintain target ATP.
+    If ATP is low, scale weights down. If ATP is high, scale weights up.
+    """
+    # Inverse metabolic stress factor
+    # stress = 1.0 means ATP is at target. stress > 1.0 means ATP is low.
+    stress = target_atp / network.atp.clamp(min=1.0)
+
+    # Scaling factor per node (destination)
+    # We want to multiply weights by (1.0 - delta)
+    # delta is positive if stress is high (ATP low)
+    delta = rate * (stress - 1.0)
+    scaling = (1.0 - delta).clamp(min=0.5, max=1.5)
+
+    # Sparse gather: apply scaling[dst] to each weight
+    network.weights.mul_(scaling[network.dst_idx])

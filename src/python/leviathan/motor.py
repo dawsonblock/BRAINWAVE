@@ -40,7 +40,17 @@ class MotorDecoder:
         mask_left = (torch.cos(phi_left) > 0).float()
         mask_right = (torch.cos(phi_right) > 0).float()
 
-        torque_left = self.kappa * torch.sum(mask_left * phi_dot_left).item()
-        torque_right = self.kappa * torch.sum(mask_right * phi_dot_right).item()
+        # ---- Phase 15 Behavioral Inhibition ----
+        # High SER (Serotonin) -> Behavioral Persistence / Inhibition (Lower gain)
+        # High ACH (Acetylcholine) -> High Arousal / Exploration (Higher gain)
+        ser = float(self.network.SER)
+        ach = float(self.network.ACH)
+
+        # Inhibition factor: scales gain down as SER increases, up as ACH increases
+        inhibition = ach / (1.0 + ser)
+        effective_kappa = self.kappa * inhibition
+
+        torque_left = effective_kappa * torch.sum(mask_left * phi_dot_left).item()
+        torque_right = effective_kappa * torch.sum(mask_right * phi_dot_right).item()
 
         return torque_left, torque_right

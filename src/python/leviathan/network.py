@@ -71,6 +71,11 @@ class LeviathanNetwork:
         self.error = torch.zeros(num_nodes)  # Prediction error
         self.ALPHA_ACTIVE_INF = 0.5  # Precision/gain on error
 
+        # ── Phase 13: Biological Metrics ──────────────────────────────
+        self.lyapunov_exponent = 0.0
+        self.branching_ratio = 1.0
+        self.prev_activation = torch.zeros(num_nodes)
+
         # Ring buffers  (MAX_DELAY_TICKS, N)
         self.history_phi = torch.zeros(MAX_DELAY_TICKS, num_nodes)
         self.history_phi_dot = torch.zeros(MAX_DELAY_TICKS, num_nodes)
@@ -92,6 +97,12 @@ class LeviathanNetwork:
         self.NA = 0.1  # Noradrenaline (noise / arousal)
         self.SER = 1.0  # Serotonin    (coupling multiplier)
         self.ACH = 1.0  # Acetylcholine (inertia reduction — cortex)
+
+        # ── Phase 14: Liquid State Machine Memory ─────────────────────
+        from .memory import LiquidStateMachine
+
+        self.lsm = LiquidStateMachine(input_dim=num_nodes, output_dim=2)
+        self.lsm_loss = 0.0
 
     # ─────────────────────────────────────────────────────────────────────
     def _build_dst_idx(self) -> torch.Tensor:
@@ -205,6 +216,9 @@ class LeviathanNetwork:
         self.history_phi_dot[next_idx] = self.phi_dot
         self.current_tick += 1
 
+        # ── Phase 13: Biological Metrics ──────────────────────────────
+        self._update_biological_metrics()
+
         # Return per-edge delayed phases for PTDP (avoids recomputing)
         return self._get_delayed_phi_per_edge()
 
@@ -217,6 +231,50 @@ class LeviathanNetwork:
         hist = self.current_tick % MAX_DELAY_TICKS
         slots = (hist - self.delay_ticks) % MAX_DELAY_TICKS
         return self.history_phi[slots, self.col_idx]
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _update_biological_metrics(self):
+        """
+        Estimate Lyapunov exponent (stability) and Branching Ratio (criticality).
+        """
+        # 1. Lyapunov-ish: Track mean absolute change in velocity (divergence proxy)
+        # In a real Lyapunov calculation, we'd perturb a shadow state.
+        # Here we use a rolling estimate of velocity variance as a stability proxy.
+        current_accel = torch.abs(
+            self.phi_dot
+            - self.history_phi_dot[(self.current_tick - 1) % MAX_DELAY_TICKS]
+        )
+        self.lyapunov_exponent = 0.95 * self.lyapunov_exponent + 0.05 * float(
+            torch.mean(current_accel)
+        )
+
+        # 2. Branching Ratio: <Active Nodes at t> / <Active Nodes at t-1>
+        # Define 'active' as a phase-velocity threshold.
+        threshold = 0.1
+        active_now = (torch.abs(self.phi_dot) > threshold).float()
+        active_prev = (torch.abs(self.prev_activation) > threshold).float()
+
+        counts_now = torch.sum(active_now)
+        counts_prev = torch.sum(active_prev)
+
+        if counts_prev > 0:
+            ratio = float(counts_now / counts_prev)
+            self.branching_ratio = 0.99 * self.branching_ratio + 0.01 * ratio
+
+        self.prev_activation = self.phi_dot.clone()
+
+    # ─────────────────────────────────────────────────────────────────────
+    @property
+    def cognitive_entropy(self) -> float:
+        """
+        Calculates Shannon Entropy of the network's phase-velocity distribution.
+        Higher entropy indicates higher cognitive diversity/arousal.
+        """
+        # Normalize phi_dot into a probability distribution
+        # We use softmax over abs(phi_dot) to get a distribution
+        probs = torch.softmax(torch.abs(self.phi_dot) * 2.0, dim=0)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-9))
+        return float(entropy)
 
     # ─────────────────────────────────────────────────────────────────────
     def prune_weakest_starving(self):
@@ -232,3 +290,75 @@ class LeviathanNetwork:
                 continue
             local_min = int(torch.argmin(self.weights[start:end]))
             self.weights[start + local_min] = 0.0
+
+    # ─────────────────────────────────────────────────────────────────────
+    def synaptic_birth(self, surplus_atp=2000.0, birth_rate=0.01):
+        """
+        Structural Plasticity: Grow new synapses for nodes with high ATP.
+        """
+        # Find nodes with high ATP surplus
+        wealthy = (self.atp > surplus_atp).nonzero(as_tuple=True)[0]
+        if len(wealthy) == 0:
+            return
+
+        added_edges = []
+        for dst in wealthy:
+            if torch.rand(1) > birth_rate:
+                continue
+
+            dst = int(dst)
+            # Find a spatial neighbor (simplified: random node for now,
+            # ideally closer in self.positions)
+            src = int(torch.randint(0, self.num_nodes, (1,)))
+            if src == dst:
+                continue
+
+            # Create new edge
+            # Initial weight is very small/exploratory
+            is_inh = self.is_inhibitory[src]
+            w = -0.01 if is_inh else 0.01
+
+            # Distance-based delay
+            dist = torch.norm(self.positions[src] - self.positions[dst])
+            delay = int(dist / 5.0) + 1  # 5 units per tick
+            delay = min(delay, MAX_DELAY_TICKS - 1)
+
+            added_edges.append((dst, src, w, delay))
+
+        if not added_edges:
+            return
+
+        # CSR Re-allocation logic (Batch update)
+        # Note: This is an expensive operation in Python/Torch.
+        # Ideally we'd pre-allocate 'ghost' edges.
+        for dst, src, w, delay in added_edges:
+            # Shift row_ptr
+            self.row_ptr[dst + 1 :] += 1
+
+            # Insert into col_idx, weights, delay_ticks, is_inhibitory
+            insert_pos = int(self.row_ptr[dst + 1]) - 1
+
+            self.col_idx = torch.cat(
+                [
+                    self.col_idx[:insert_pos],
+                    torch.tensor([src]),
+                    self.col_idx[insert_pos:],
+                ]
+            )
+            self.weights = torch.cat(
+                [
+                    self.weights[:insert_pos],
+                    torch.tensor([w]),
+                    self.weights[insert_pos:],
+                ]
+            )
+            self.delay_ticks = torch.cat(
+                [
+                    self.delay_ticks[:insert_pos],
+                    torch.tensor([delay]),
+                    self.delay_ticks[insert_pos:],
+                ]
+            )
+
+        # Update dst_idx
+        self.dst_idx = self._build_dst_idx()
