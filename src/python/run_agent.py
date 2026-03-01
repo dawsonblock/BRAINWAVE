@@ -13,22 +13,24 @@ from leviathan.config import (
 )
 
 
-def run_agent_simulation(ticks=3000):
-    print("Initializing Leviathan v2.0 Agent Simulation...")
+def run_agent_simulation(ticks=3000, num_agents=3):
+    print(f"Initializing Leviathan v2.0 Multi-Agent Simulation (N={num_agents})...")
 
-    # 1. Setup Brain
+    # 1. Setup Brains
     num_nodes = 200
-    brain = LeviathanNetwork(num_nodes)
+    brains = [LeviathanNetwork(num_nodes) for _ in range(num_agents)]
+    motor_decoders = [MotorDecoder(network=b) for b in brains]
 
     # 5 Raycast Sensors -> Thalamus nodes 0-4
+    # 5 Wall Sensors -> Thalamus nodes 5-9
+    # 5 Peer Sensors -> Thalamus nodes 15-19
     sensor_indices = list(range(5))
-
-    # MotorDecoder reads Cerebellum region labels from the brain
-    motor_decoder = MotorDecoder(network=brain)
+    wall_indices = list(range(5, 10))
+    peer_indices = list(range(15, 20))
 
     # 2. Setup Body/Environment
-    arena = Arena(width=800, height=600, num_foods=20)
-    arena.add_default_obstacles()  # 8D: add interior wall obstacles
+    arena = Arena(width=800, height=600, num_foods=25, num_agents=num_agents)
+    arena.add_default_obstacles()
 
     # Logging
     history = {
@@ -45,172 +47,157 @@ def run_agent_simulation(ticks=3000):
         "torque_r": [],
         "foods_eaten": 0,
         "replay_buffer": [],  # Store (phi_dot, target_vec) on reward
+        "last_torques": [(0.0, 0.0) for _ in range(num_agents)],
     }
-    # Track baseline ATP
-    start_atp = float(brain.atp.sum())
+    # Track baseline ATP across all agents
+    start_atp = float(sum(b.atp.sum() for b in brains))
 
     print(f"Starting simulation for {ticks} ticks...")
     for tick in range(ticks):
+        for a_idx in range(num_agents):
+            brain = brains[a_idx]
+            decoder = motor_decoders[a_idx]
 
-        # ---- SENSORY PHASE ----
-        # Dual-channel raycasts: food proximity + wall danger
-        food_prox, wall_prox = arena.get_sensory_raycasts(
-            num_rays=5, fov_deg=120, max_dist=250.0
-        )
-
-        # Thalamus nodes 0-4: food proximity (approach bias)
-        # Thalamus nodes 5-9: wall proximity (avoidance signal)
-        s_input = torch.zeros(num_nodes)
-        for i, prox in enumerate(food_prox):
-            s_input[sensor_indices[i]] = SENSORY_GAIN * float(prox)
-        wall_indices = list(range(5, 10))
-        for i, prox in enumerate(wall_prox):
-            if wall_indices[i] < num_nodes:
-                s_input[wall_indices[i]] = WALL_GAIN * float(prox)
-
-        # ---- PHASE 16: Chemical Gradient (Scent) ----
-        scent_intensity = arena.get_chemical_gradient()
-        # Broadcast scent to "Limbic" nodes (indices 10-14 as a proxy for olfactory bulb)
-        scent_indices = list(range(10, 15))
-        for i in scent_indices:
-            s_input[i] += scent_intensity * 50.0  # High gain for gradient sensing
-
-        # ---- PHASE 16: LSM Memory Drive (Goal Attractor) ----
-        # If hungry (low ATP), use LSM prediction as a top-down drive
-        if brain.atp.mean() < 800.0:
-            # Get LSM prediction from last reservoir state
-            # This is the "internal belief" of where food is
-            memory_vec = brain.lsm.readout(brain.phi_dot)  # Prediction: [dx, dy]
-
-            # Map memory_vec to a phase drive
-            # Injecting drive into indices 20-39 (Association Cortex)
-            association_indices = list(range(20, 40))
-            drive_mag = 10.0 * (1.0 - (brain.atp.mean() / 800.0))  # Hunger scales drive
-            for i in association_indices:
-                # Simple drive: move phase towards the 'memory' direction
-                s_input[i] += drive_mag * torch.mean(torch.abs(memory_vec))
-
-        # ---- COGNITIVE PHASE ----
-        delayed_phi = brain.step(external_sensory_input=s_input)
-
-        # ── Phase 12 Plasticity: PTDP + Active Inference Learning ─────
-        if brain.current_tick > 10:
-            from leviathan.plasticity import (
-                apply_ptdp,
-                apply_active_inf_learning,
-                apply_synaptic_scaling,
+            # ---- SENSORY PHASE ----
+            # Tri-channel raycasts: food, walls, peers
+            food_prox, wall_prox, peer_prox = arena.get_sensory_raycasts(
+                agent_idx=a_idx, num_rays=5, fov_deg=120, max_dist=250.0
             )
 
-            apply_ptdp(brain, delayed_phi)
-            apply_active_inf_learning(brain, delayed_phi)
-            apply_synaptic_scaling(brain)
+            s_input = torch.zeros(num_nodes)
+            for i, prox in enumerate(food_prox):
+                s_input[sensor_indices[i]] = SENSORY_GAIN * float(prox)
+            for i, prox in enumerate(wall_prox):
+                s_input[wall_indices[i]] = WALL_GAIN * float(prox)
+            for i, prox in enumerate(peer_prox):
+                s_input[peer_indices[i]] = 20.0 * float(prox)  # Peer avoidance gain
 
-            # ── Phase 14: Structural Plasticity & Memory ──
-            brain.synaptic_birth()
+            # ---- PHASE 16/17: Chemical & Pheromone Sensing ----
+            food_scent, r_phero, d_phero = arena.get_chemical_gradient(a_idx)
 
-            # Train LSM to predict relative food proximity
-            # We use the current arena state as target
-            if len(arena.foods) > 0:
-                # Find nearest food relative to agent
-                agent_p = np.array([arena.agent_x, arena.agent_y])
-                food_ps = np.array([[f[0], f[1]] for f in arena.foods])
-                diffs = food_ps - agent_p
-                dist_sq = np.sum(diffs**2, axis=1)
-                nearest_idx = np.argmin(dist_sq)
-                target_vec = (
-                    torch.tensor(diffs[nearest_idx], dtype=torch.float32) / 500.0
+            # Food Scent: Limbic nodes 10-14
+            for i in range(10, 15):
+                s_input[i] += food_scent * 50.0
+
+            # Social Pheromones: Modulate Endocrine directly (Social DA/ACH)
+            # Reward pheromone from peers boost DA (Social Validation)
+            # Danger pheromone from peers boost ACH (Social Alert)
+            brain.DA = min(brain.DA + r_phero * 0.2, 10.0)
+            brain.ACH = min(brain.ACH + d_phero * 0.5, 10.0)
+
+            # ---- PHASE 16: LSM Memory Drive ----
+            if brain.atp.mean() < 800.0:
+                memory_vec = brain.lsm.readout(brain.phi_dot)
+                association_indices = list(range(20, 40))
+                drive_mag = 10.0 * (1.0 - (brain.atp.mean() / 800.0))
+                for i in association_indices:
+                    s_input[i] += drive_mag * torch.mean(torch.abs(memory_vec))
+
+            # ---- PHASE 17: Neural Mimicry (Action Observation) ----
+            # If peers are visible, inject their averaged torque into observer's brain
+            # Observation region: indices 40-59
+            if peer_prox.max() > 0.1:
+                obs_indices = list(range(40, 60))
+                # Simple proxy: average torque of all OTHER agents
+                avg_l = sum(
+                    t[0] for i, t in enumerate(history["last_torques"]) if i != a_idx
+                ) / (num_agents - 1)
+                avg_r = sum(
+                    t[1] for i, t in enumerate(history["last_torques"]) if i != a_idx
+                ) / (num_agents - 1)
+                for i in obs_indices:
+                    s_input[i] += (
+                        avg_l + avg_r
+                    ) * 5.0  # Injection of social motor state
+            delayed_phi = brain.step(external_sensory_input=s_input)
+
+            # ---- PLASTICITY PHASE ----
+            if brain.current_tick > 10:
+                from leviathan.plasticity import (
+                    apply_ptdp,
+                    apply_active_inf_learning,
+                    apply_synaptic_scaling,
                 )
 
-                # Input for LSM is the current reservoir state (phi_dot)
-                brain.lsm_loss = brain.lsm.train_step(brain.phi_dot, target_vec)
+                apply_ptdp(brain, delayed_phi)
+                apply_active_inf_learning(brain, delayed_phi)
+                apply_synaptic_scaling(brain)
+                brain.synaptic_birth()
 
-        update_metabolism(brain)
-        update_neuromodulators(brain)
+                # Train LSM
+                target_vec = torch.zeros(2)
+                if len(arena.foods) > 0:
+                    agent_p = np.array([arena.agents_x[a_idx], arena.agents_y[a_idx]])
+                    food_ps = np.array([[f[0], f[1]] for f in arena.foods])
+                    diffs = food_ps - agent_p
+                    dist_sq = np.sum(diffs**2, axis=1)
+                    nearest_idx = np.argmin(dist_sq)
+                    target_vec = (
+                        torch.tensor(diffs[nearest_idx], dtype=torch.float32) / 500.0
+                    )
+                    brain.lsm_loss = brain.lsm.train_step(brain.phi_dot, target_vec)
 
-        # Export topology once for CUDA parity verification
-        if tick == 0:
-            from leviathan.topology import save_topology_bin
+            update_metabolism(brain)
+            update_neuromodulators(brain)
 
-            # Fetch all required components for save_topology_bin
-            save_topology_bin(
-                "leviathan_topology_p12.bin",
-                (
-                    brain.row_ptr,
-                    brain.col_idx,
-                    brain.weights,
-                    brain.delay_ticks,
-                    brain.is_inhibitory,
-                    brain.positions,
-                    brain.region_labels,
-                ),
-            )
+            # ---- MOTOR PHASE ----
+            raw_l, raw_r = decoder.decode_torque()
+            torque_l = raw_l * MOTOR_GAIN + 2.0
+            torque_r = raw_r * MOTOR_GAIN + 2.0
 
-        # ---- MOTOR PHASE ----
-        raw_l, raw_r = motor_decoder.decode_torque()
+            foods_eaten = arena.move_agent(a_idx, torque_l, torque_r)
+            history["last_torques"][a_idx] = (torque_l, torque_r)
 
-        # Adaptive motor gain: scale so that a typical phi_dot sum (~5-20 rad/s)
-        # maps to a useful arena displacement per tick.
-        # We also add a small forward bias so the agent explores even early on.
-        torque_l = raw_l * MOTOR_GAIN + 2.0
-        torque_r = raw_r * MOTOR_GAIN + 2.0
+            # ---- REWARD PHASE ----
+            if foods_eaten > 0:
+                history["foods_eaten"] += foods_eaten
+                brain.atp += ATP_FOOD_REWARD * foods_eaten
+                brain.DA = min(brain.DA + DA_REWARD_SPIKE * foods_eaten, 10.0)
 
-        foods_eaten = arena.move_agent(torque_l, torque_r)
+                # Consolidate memory
+                history["replay_buffer"].append(
+                    {
+                        "brain_idx": a_idx,
+                        "state": brain.phi_dot.clone(),
+                        "target": (
+                            target_vec.clone() if "target_vec" in locals() else None
+                        ),
+                    }
+                )
 
-        # ---- REWARD PHASE ----
-        if foods_eaten > 0:
-            history["foods_eaten"] += foods_eaten
-            brain.atp += ATP_FOOD_REWARD * foods_eaten
-            brain.DA = min(brain.DA + DA_REWARD_SPIKE * foods_eaten, 10.0)
-
-            # ── Phase 14: Add to Replay Buffer ──
-            # Store the state-action-reward triplet (simplified)
-            history["replay_buffer"].append(
-                {
-                    "state": brain.phi_dot.clone(),
-                    "target": target_vec.clone() if "target_vec" in locals() else None,
-                }
-            )
+        if tick % 100 == 0:
+            # Stats for first agent (as a representative)
+            b0 = brains[0]
             print(
-                f"  [Tick {tick:>5}] Ate food! ATP={brain.atp.mean().item():.1f}  "
-                f"DA={brain.DA:.2f}  pos=({arena.agent_x:.0f},{arena.agent_y:.0f})"
-            )
-
-        if tick % 50 == 0:
-            E = brain.weights.shape[0]
-            entropy = brain.cognitive_entropy
-            # Metabolic Efficiency: Foods eaten per 1000 units of ATP spent
-            # (Simplified proxy using total ATP / foods)
-            print(
-                f"  [Tick {tick:5d}] Lyap={brain.lyapunov_exponent:.3f} Ent={entropy:.3f} "
-                f"E={E} LSM_L={brain.lsm_loss:.4f} DA={brain.DA:.2f} SER={brain.SER:.2f}"
+                f"  [Tick {tick:5d}] Ate={history['foods_eaten']} Lyap={b0.lyapunov_exponent:.3f} "
+                f"Ent={b0.cognitive_entropy:.3f} E={b0.weights.shape[0]} DA={b0.DA:.2f}"
             )
 
         # ---- LOGGING (every 30 ticks) ----
         if tick % 30 == 0:
-            history["x"].append(arena.agent_x)
-            history["y"].append(arena.agent_y)
-            history["heading"].append(arena.agent_heading)
-            history["atp"].append(brain.atp.mean().item())
-            history["da"].append(brain.DA)
-            history["na"].append(brain.NA)
-            history["ser"].append(brain.SER)
-            history["ach"].append(brain.ACH)
-            history["entropy"].append(brain.cognitive_entropy)
-            history["torque_l"].append(torque_l)
-            history["torque_r"].append(torque_r)
+            history["atp"].append(
+                float(torch.stack([b.atp.mean() for b in brains]).mean())
+            )
+            history["da"].append(float(sum(b.DA for b in brains) / num_agents))
+            history["entropy"].append(
+                float(sum(b.cognitive_entropy for b in brains) / num_agents)
+            )
 
-    # ---- OFFLINE REPLAY PHASE (Memory Consolidation) ----
+    # ---- OFFLINE REPLAY PHASE ----
     if history["replay_buffer"]:
         print(
-            f"\nStarting Offline Replay (Consolidating {len(history['replay_buffer'])} memories)..."
+            f"\nStarting Offline Replay (N={len(history['replay_buffer'])} memories)..."
         )
         for i, memory in enumerate(history["replay_buffer"]):
+            brain = brains[memory["brain_idx"]]
             state = memory["state"]
             target = memory["target"]
             if target is not None:
                 loss = brain.lsm.train_step(state, target)
-                if i % 10 == 0:
-                    print(f"  [Replay {i:>3}] LSM Consolidation Loss: {loss:.4f}")
+                if i % 20 == 0:
+                    print(
+                        f"  [Replay {i:>3}] Brain {memory['brain_idx']} LSM Loss: {loss:.4f}"
+                    )
 
     print("\nSimulation Complete.")
     print(f"  Total Food Eaten : {history['foods_eaten']}")

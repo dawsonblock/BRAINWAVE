@@ -15,17 +15,32 @@ class Wall:
 
 
 class Arena:
-    def __init__(self, width=800, height=600, num_foods=20, walls=None, seed=None):
+    def __init__(
+        self, width=800, height=600, num_foods=20, num_agents=1, walls=None, seed=None
+    ):
         if seed is not None:
             random.seed(seed)
         self.width = width
         self.height = height
+        self.num_agents = num_agents
 
-        # Agent state
-        self.agent_x = width / 2
-        self.agent_y = height / 2
-        self.agent_heading = 0.0
+        # Multi-Agent state
+        self.agents_x = [width / 2 + random.uniform(-50, 50) for _ in range(num_agents)]
+        self.agents_y = [
+            height / 2 + random.uniform(-50, 50) for _ in range(num_agents)
+        ]
+        self.agents_heading = [
+            random.uniform(0, 2 * math.pi) for _ in range(num_agents)
+        ]
         self.agent_radius = 15.0
+
+        # Pheromone Grid (Reward & Danger trails)
+        # Resolution: 40x30 for 800x600 arena (20px per cell)
+        self.grid_res = 20
+        self.grid_w = width // self.grid_res
+        self.grid_h = height // self.grid_res
+        self.pheromones_reward = np.zeros((self.grid_w, self.grid_h), dtype=np.float32)
+        self.pheromones_danger = np.zeros((self.grid_w, self.grid_h), dtype=np.float32)
 
         # Walls (8D: obstacle avoidance)
         self.walls: list[Wall] = walls if walls else []
@@ -70,10 +85,10 @@ class Arena:
         )
 
     # ── Kinematics ───────────────────────────────────────────────────────
-    def move_agent(self, torque_left, torque_right):
+    def move_agent(self, agent_idx, torque_left, torque_right):
         """
-        Differential drive kinematics. Torques treated as wheel velocities (px/step).
-        Returns count of food items eaten this step.
+        Differential drive kinematics for a specific agent.
+        Returns count of food items eaten by this agent.
         """
         L = 30.0
         v_l = float(torque_left)
@@ -82,59 +97,90 @@ class Arena:
         v = (v_r + v_l) / 2.0
         w = (v_r - v_l) / L
 
-        self.agent_heading = (self.agent_heading + w) % (2 * math.pi)
-        nx = self.agent_x + v * math.cos(self.agent_heading)
-        ny = self.agent_y + v * math.sin(self.agent_heading)
+        # Decay pheromones globally (called once per simulation step ideally,
+        # but here we do it per agent move for simplicity, scaled down)
+        self.pheromones_reward *= 0.999
+        self.pheromones_danger *= 0.999
+
+        h = self.agents_heading[agent_idx]
+        self.agents_heading[agent_idx] = (h + w) % (2 * math.pi)
+
+        nx = self.agents_x[agent_idx] + v * math.cos(self.agents_heading[agent_idx])
+        ny = self.agents_y[agent_idx] + v * math.sin(self.agents_heading[agent_idx])
 
         # Wall collision: slide along axis
-        if not self._point_inside_wall(nx, self.agent_y):
-            self.agent_x = nx
-        if not self._point_inside_wall(self.agent_x, ny):
-            self.agent_y = ny
+        if not self._point_inside_wall(nx, self.agents_y[agent_idx]):
+            self.agents_x[agent_idx] = nx
+        if not self._point_inside_wall(self.agents_x[agent_idx], ny):
+            self.agents_y[agent_idx] = ny
+
+        # Agent-Agent collision
+        for i in range(self.num_agents):
+            if i == agent_idx:
+                continue
+            dx = self.agents_x[agent_idx] - self.agents_x[i]
+            dy = self.agents_y[agent_idx] - self.agents_y[i]
+            dist_sq = dx * dx + dy * dy
+            min_dist = self.agent_radius * 2
+            if dist_sq < min_dist * min_dist:
+                # Push back slightly
+                dist = math.sqrt(dist_sq) + 1e-6
+                overlap = min_dist - dist
+                self.agents_x[agent_idx] += (dx / dist) * overlap * 0.5
+                self.agents_y[agent_idx] += (dy / dist) * overlap * 0.5
 
         # Boundary wrap
-        self.agent_x = self.agent_x % self.width
-        self.agent_y = self.agent_y % self.height
+        self.agents_x[agent_idx] = self.agents_x[agent_idx] % self.width
+        self.agents_y[agent_idx] = self.agents_y[agent_idx] % self.height
 
-        return self.check_collisions()
+        return self.check_collisions(agent_idx)
 
-    def check_collisions(self):
+    def check_collisions(self, agent_idx):
         eaten_count = 0
         remaining = []
+        ax, ay = self.agents_x[agent_idx], self.agents_y[agent_idx]
         thresh2 = (self.agent_radius + self.food_radius) ** 2
         for fx, fy in self.foods:
-            dx = self.agent_x - fx
-            dy = self.agent_y - fy
+            dx = ax - fx
+            dy = ay - fy
             if dx * dx + dy * dy <= thresh2:
                 eaten_count += 1
                 self.spawn_food()
+                # Drop reward pheromone at collision site
+                gx = int(ax / self.grid_res) % self.grid_w
+                gy = int(ay / self.grid_res) % self.grid_h
+                self.pheromones_reward[gx, gy] = min(
+                    self.pheromones_reward[gx, gy] + 1.0, 5.0
+                )
             else:
                 remaining.append((fx, fy))
         self.foods = remaining
         return eaten_count
 
     # ── Raycasting ───────────────────────────────────────────────────────
-    def get_sensory_raycasts(self, num_rays=5, fov_deg=120, max_dist=250.0):
+    def get_sensory_raycasts(self, agent_idx, num_rays=5, fov_deg=120, max_dist=250.0):
         """
-        Returns (food_proximities, wall_proximities), each shape (num_rays,).
-        Food:  1 = food touching agent, 0 = nothing in range
-        Wall:  1 = wall at agent face,  0 = clear
+        Returns (food_proximities, wall_proximities, peer_proximities), each shape (num_rays,).
         """
         food_prox = np.zeros(num_rays, dtype=np.float32)
         wall_prox = np.zeros(num_rays, dtype=np.float32)
+        peer_prox = np.zeros(num_rays, dtype=np.float32)
+
+        ax, ay = self.agents_x[agent_idx], self.agents_y[agent_idx]
+        ah = self.agents_heading[agent_idx]
 
         fov_rad = math.radians(fov_deg)
         angles = np.linspace(-fov_rad / 2, fov_rad / 2, num_rays)
 
         for i, offset in enumerate(angles):
-            ray_angle = self.agent_heading + offset
+            ray_angle = ah + offset
             rdx = math.cos(ray_angle)
             rdy = math.sin(ray_angle)
 
             # Food hit
             closest_food = max_dist
             for fx, fy in self.foods:
-                vx, vy = fx - self.agent_x, fy - self.agent_y
+                vx, vy = fx - ax, fy - ay
                 proj = vx * rdx + vy * rdy
                 if 0 < proj < closest_food:
                     ortho = abs(vx * (-rdy) + vy * rdx)
@@ -143,13 +189,27 @@ class Arena:
             if closest_food < max_dist:
                 food_prox[i] = 1.0 - closest_food / max_dist
 
+            # Peer hit
+            closest_peer = max_dist
+            for p_idx in range(self.num_agents):
+                if p_idx == agent_idx:
+                    continue
+                vx, vy = self.agents_x[p_idx] - ax, self.agents_y[p_idx] - ay
+                proj = vx * rdx + vy * rdy
+                if 0 < proj < closest_peer:
+                    ortho = abs(vx * (-rdy) + vy * rdx)
+                    if ortho <= self.agent_radius:
+                        closest_peer = proj
+            if closest_peer < max_dist:
+                peer_prox[i] = 1.0 - closest_peer / max_dist
+
             # Wall hit (step-march)
             closest_wall = max_dist
             step = 5.0
             dist = 0.0
             while dist < max_dist:
-                px = self.agent_x + rdx * dist
-                py = self.agent_y + rdy * dist
+                px = ax + rdx * dist
+                py = ay + rdy * dist
                 if self._point_inside_wall(px, py):
                     closest_wall = dist
                     break
@@ -157,43 +217,57 @@ class Arena:
             if closest_wall < max_dist:
                 wall_prox[i] = 1.0 - closest_wall / max_dist
 
-        return food_prox, wall_prox
+        return food_prox, wall_prox, peer_prox
 
     # ── Chemical Gradient (Scents) ───────────────────────────────────────
-    def get_chemical_gradient(self):
+    def get_chemical_gradient(self, agent_idx):
         """
-        Returns a scalar intensity of the 'scent' (food proximity sum).
-        Formula: Σ (1 / (distance^2 + epsilon)) for all food items.
+        Returns (food_scent, reward_pheromone, danger_pheromone) intensities.
         """
-        intensity = 0.0
-        epsilon = 100.0  # Smooths out infinite spikes when on top of food
-        for fx, fy in self.foods:
-            dx = self.agent_x - fx
-            dy = self.agent_y - fy
-            dist_sq = dx * dx + dy * dy
-            intensity += 1.0 / (dist_sq + epsilon)
+        ax, ay = self.agents_x[agent_idx], self.agents_y[agent_idx]
 
-        # Scaling intensity for neural input [0, ~1.0]
-        # With epsilon=100, max intensity per food is 0.01.
-        # With 20 foods, max possible is ~0.2. Scaling up for visibility.
-        return min(intensity * 10.0, 1.0)
+        # 1. Food Scent (Inverse Square)
+        food_intensity = 0.0
+        epsilon = 100.0
+        for fx, fy in self.foods:
+            dx, dy = ax - fx, ay - fy
+            food_intensity += 1.0 / (dx * dx + dy * dy + epsilon)
+        food_scent = min(food_intensity * 10.0, 1.0)
+
+        # 2. Pheromones (Grid Sampling)
+        gx, gy = (
+            int(ax / self.grid_res) % self.grid_w,
+            int(ay / self.grid_res) % self.grid_h,
+        )
+        reward_scent = float(self.pheromones_reward[gx, gy])
+        danger_scent = float(self.pheromones_danger[gx, gy])
+
+        return food_scent, min(reward_scent, 1.0), min(danger_scent, 1.0)
 
     # ── Serialisation (for dashboard) ───────────────────────────────────
-    def to_dict(self, brain):
+    def to_dict(self, brains):
+        """brains is a list of LeviathanNetwork objects."""
+        agent_list = []
+        for i in range(self.num_agents):
+            b = brains[i]
+            agent_list.append(
+                {
+                    "id": i,
+                    "x": round(self.agents_x[i], 1),
+                    "y": round(self.agents_y[i], 1),
+                    "h": round(self.agents_heading[i], 3),
+                    "r": self.agent_radius,
+                    "stats": {
+                        "atp": round(float(b.atp.mean()), 1),
+                        "da": round(float(b.DA), 3),
+                        "na": round(float(b.NA), 3),
+                        "ser": round(float(b.SER), 3),
+                        "ach": round(float(b.ACH), 3),
+                    },
+                }
+            )
         return {
-            "agent": {
-                "x": round(self.agent_x, 1),
-                "y": round(self.agent_y, 1),
-                "h": round(self.agent_heading, 3),
-                "r": self.agent_radius,
-            },
+            "agents": agent_list,
             "foods": [{"x": round(x, 1), "y": round(y, 1)} for x, y in self.foods],
             "walls": [w.to_dict() for w in self.walls],
-            "stats": {
-                "atp": round(float(brain.atp.mean()), 1),
-                "da": round(float(brain.DA), 3),
-                "na": round(float(brain.NA), 3),
-                "ser": round(float(brain.SER), 3),
-                "ach": round(float(brain.ACH), 3),
-            },
         }
