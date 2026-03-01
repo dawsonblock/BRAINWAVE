@@ -57,3 +57,30 @@ def apply_ptdp(network, delayed_phi_edge: torch.Tensor):
 
     # Apply per-row scale to each edge's weight
     network.weights.mul_(scale[network.dst_idx])
+
+
+def apply_active_inf_learning(network, delayed_phi_edge: torch.Tensor, lr=0.0001):
+    """
+    Active Inference Learning: Update weights to minimize prediction error.
+    dw ∝ -error_dst * sin(phi_src_del - phi_dst)
+    """
+    error_dst = network.error[network.dst_idx]
+    phi_dst = network.phi[network.dst_idx]
+
+    # Gradient of squared error w.r.t coupling:
+    # E = 0.5 * error^2
+    # dE/dw = error * d(phi - phi_target)/dw
+    # In our simplified dynamics, dphi/dw ∝ sin(phi_src_del - phi_dst)
+    grad = error_dst * torch.sin(delayed_phi_edge - phi_dst)
+
+    dw = -lr * grad
+
+    # Dale's Principle Sign Enforcement
+    pos_mask = (network.weights > 0).float()
+    neg_mask = (network.weights < 0).float()
+
+    network.weights.add_(dw)
+
+    # Clamp based on original sign
+    network.weights.mul_(pos_mask).clamp_(min=0.0)
+    network.weights.add_(network.weights.mul_(neg_mask).clamp_(max=0.0))

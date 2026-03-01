@@ -35,8 +35,19 @@ __global__ void ptdp_update(
     dw = -lr_minus * expf(delta / tau_minus);
   }
 
-  float w = weights[e] + dw * dt;
-  if (w < 0.0f)
-    w = 0.0f;
-  weights[e] = w;
+  /* Dale's Principle Sign Enforcement */
+  float old_w = weights[e];
+  float new_w = old_w + dw * dt;
+
+  if (old_w > 0.0f) {
+    /* Excitatory: stay positive */
+    if (new_w < 0.0f)
+      new_w = 0.0f;
+  } else if (old_w < 0.0f) {
+    /* Inhibitory: stay negative */
+    if (new_w > 0.0f)
+      new_w = 0.0f;
+  }
+
+  weights[e] = new_w;
 }

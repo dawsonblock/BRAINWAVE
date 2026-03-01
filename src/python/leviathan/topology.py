@@ -170,6 +170,52 @@ def build_csr_topology(positions: torch.Tensor, region_labels: list):
     )
 
 
+def save_topology_bin(path: str, topo_data: tuple):
+    """
+    Save Phase 12 topology to binary for CUDA import.
+    Format:
+      [int32] N, E
+      [int32 x N+1] row_ptr
+      [int32 x E]   col_idx
+      [float32 x E] weights
+      [int32 x E]   delay_ticks
+      [float32 x N] base_omegas
+      [bool x N]    is_inhibitory
+      [bool x N]    is_cortex (from region_labels)
+    """
+    import struct
+
+    (
+        row_ptr,
+        col_idx,
+        weights,
+        delay_ticks,
+        is_inhibitory,
+        positions,
+        region_labels,
+    ) = topo_data
+    N = len(row_ptr) - 1
+    E = len(col_idx)
+
+    # Simplified omegas for export parity
+    omegas = torch.ones(N) * 1.0
+
+    is_cortex = torch.tensor(
+        [label.startswith("cortex") for label in region_labels], dtype=torch.bool
+    )
+
+    with open(path, "wb") as f:
+        f.write(struct.pack("ii", N, E))
+        f.write(row_ptr.numpy().astype("int32").tobytes())
+        f.write(col_idx.numpy().astype("int32").tobytes())
+        f.write(weights.numpy().astype("float32").tobytes())
+        f.write(delay_ticks.numpy().astype("int32").tobytes())
+        f.write(omegas.numpy().astype("float32").tobytes())
+        f.write(is_inhibitory.numpy().astype("bool").tobytes())
+        f.write(is_cortex.numpy().astype("bool").tobytes())
+    print(f"Saved Phase 12 topology to {path} (N={N}, E={E})")
+
+
 def build_distance_graph(
     N: int,
     space_size: float = 10.0,

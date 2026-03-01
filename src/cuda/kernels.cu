@@ -128,20 +128,30 @@ __global__ void kernel_kinematics(LeviathanDeviceState state) {
   float noise = state.NA * xorshift_uniform(rng);
   state.d_rng[i] = rng;
 
-  /* ACH reduces inertia (all nodes; restrict to cortex by mask if desired) */
-  float active_m = DEFAULT_INERTIA / fmaxf(0.1f, state.ACH);
+  /* Active Inference: Update Error and Drive */
+  float error = phi - state.d_phi_target[i];
+  error = atan2f(__sinf(error), __cosf(error));
+  state.d_error[i] = error;
+  float ai_drive = -ALPHA_ACTIVE_INF * error;
+
+  /* ACH reduces inertia (Cortex-only if mask is set) */
+  float m_gain = state.ACH;
+  if (state.d_cortex_mask && !state.d_cortex_mask[i]) {
+    m_gain = 1.0f; // No gain outside cortex
+  }
+  float active_m = DEFAULT_INERTIA / fmaxf(0.1f, m_gain);
 
   /* RK2 midpoint */
-  float a1 =
-      (coupling + s_force + noise - DEFAULT_DAMPING * (phi_dot - omega)) /
-      active_m;
+  float a1 = (coupling + s_force + noise + ai_drive -
+              DEFAULT_DAMPING * (phi_dot - omega)) /
+             active_m;
 
   float phi_dot_mid = phi_dot + 0.5f * DT * a1;
   float phi_mid = phi + 0.5f * DT * phi_dot;
 
-  float a2 =
-      (coupling + s_force + noise - DEFAULT_DAMPING * (phi_dot_mid - omega)) /
-      active_m;
+  float a2 = (coupling + s_force + noise + ai_drive -
+              DEFAULT_DAMPING * (phi_dot_mid - omega)) /
+             active_m;
 
   phi_dot += DT * a2;
   phi += DT * phi_dot_mid;

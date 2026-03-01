@@ -163,10 +163,17 @@ class LeviathanNetwork:
         noise = self.NA * torch.randn(N)
 
         # ── Active Inference: Update Error ────────────────────────────
-        # Error = Actual - Expected (simplified)
-        self.error = self.phi - self.phi_target
-        # Wrap error to [-pi, pi]
-        self.error = torch.atan2(torch.sin(self.error), torch.cos(self.error))
+        # Target = exponential moving average of sensory-driven state
+        # (Simplified: filter sensory input into the target)
+        target_alpha = 0.05
+        self.phi_target = (
+            1.0 - target_alpha
+        ) * self.phi_target + target_alpha * external_sensory_input
+
+        # Error = Actual - Expected (wrapped to [-pi, pi])
+        self.error = torch.atan2(
+            torch.sin(self.phi - self.phi_target), torch.cos(self.phi - self.phi_target)
+        )
 
         # ── Region-scoped ACh: inertia reduction in cortex only ────────
         inertia = self.m.clone()

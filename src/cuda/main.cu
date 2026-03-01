@@ -28,6 +28,7 @@ struct HostTopology {
   int N, E;
   std::vector<int> row_ptr, col_idx, delay_ticks;
   std::vector<float> weights, base_omegas;
+  std::vector<bool> is_inhibitory, is_cortex;
 };
 
 bool load_topology(const char *path, HostTopology &topo) {
@@ -51,6 +52,11 @@ bool load_topology(const char *path, HostTopology &topo) {
   f.read((char *)topo.weights.data(), topo.E * 4);
   f.read((char *)topo.delay_ticks.data(), topo.E * 4);
   f.read((char *)topo.base_omegas.data(), topo.N * 4);
+
+  topo.is_inhibitory.resize(topo.N);
+  topo.is_cortex.resize(topo.N);
+  f.read((char *)topo.is_inhibitory.data(), topo.N);
+  f.read((char *)topo.is_cortex.data(), topo.N);
   return true;
 }
 
@@ -104,12 +110,18 @@ int main(int argc, char **argv) {
   alloc_and_copy(&state.d_csr_weights, topo.weights);
   alloc_and_copy(&state.d_delay_ticks, topo.delay_ticks);
   alloc_and_copy(&state.d_base_omegas, topo.base_omegas);
+  alloc_and_copy(&state.d_is_inhibitory, topo.is_inhibitory);
+  alloc_and_copy(&state.d_cortex_mask, topo.is_cortex);
 
   /* Node state */
   std::vector<float> zeros_n(N, 0.0f), atp_n(N, 1000.0f);
   alloc_and_copy(&state.d_phi, zeros_n);
   alloc_and_copy(&state.d_phi_dot, zeros_n);
   alloc_and_copy(&state.d_atp, atp_n);
+
+  /* Active Inference state */
+  alloc_and_copy(&state.d_phi_target, zeros_n);
+  alloc_and_copy(&state.d_error, zeros_n);
 
   /* Sensory forcing (host writes here each tick) */
   CUDA_CHECK(cudaMalloc(&state.d_sensory_input, N * sizeof(float)));

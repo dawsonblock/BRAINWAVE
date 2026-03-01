@@ -63,9 +63,35 @@ def run_agent_simulation(ticks=3000):
                 s_input[wall_indices[i]] = WALL_GAIN * float(prox)
 
         # ---- COGNITIVE PHASE ----
-        brain.step(external_sensory_input=s_input)
+        delayed_phi = brain.step(external_sensory_input=s_input)
+
+        # ── Phase 12 Plasticity: PTDP + Active Inference Learning ─────
+        if brain.current_tick > 10:
+            from leviathan.plasticity import apply_ptdp, apply_active_inf_learning
+
+            apply_ptdp(brain, delayed_phi)
+            apply_active_inf_learning(brain, delayed_phi)
+
         update_metabolism(brain)
         update_neuromodulators(brain)
+
+        # Export topology once for CUDA parity verification
+        if tick == 0:
+            from leviathan.topology import save_topology_bin
+
+            # Fetch all required components for save_topology_bin
+            save_topology_bin(
+                "leviathan_topology_p12.bin",
+                (
+                    brain.row_ptr,
+                    brain.col_idx,
+                    brain.weights,
+                    brain.delay_ticks,
+                    brain.is_inhibitory,
+                    brain.positions,
+                    brain.region_labels,
+                ),
+            )
 
         # ---- MOTOR PHASE ----
         raw_l, raw_r = motor_decoder.decode_torque()

@@ -15,7 +15,7 @@ row_sum_kernel(int E, const int *__restrict__ dst_idx,
   int e = blockIdx.x * blockDim.x + threadIdx.x;
   if (e >= E)
     return;
-  atomicAdd(&row_sums[dst_idx[e]], weights[e]);
+  atomicAdd(&row_sums[dst_idx[e]], fabsf(weights[e]));
 }
 
 __global__ void normalize_weights(int E, const int *__restrict__ dst_idx,
