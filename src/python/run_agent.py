@@ -1,9 +1,12 @@
 import torch
+import torch.nn as nn
+import math
 import numpy as np
 from environment.arena import Arena
 from leviathan.network import LeviathanNetwork
 from leviathan.motor import MotorDecoder
 from leviathan.endocrine import update_metabolism, update_neuromodulators
+from leviathan.evolution import Genome, EvoController
 from leviathan.config import (
     DA_REWARD_SPIKE,
     ATP_FOOD_REWARD,
@@ -13,50 +16,44 @@ from leviathan.config import (
 )
 
 
-def run_agent_simulation(ticks=3000, num_agents=3):
-    print(f"Initializing Leviathan v2.0 Multi-Agent Simulation (N={num_agents})...")
+def run_agent_simulation(ticks=1500, num_agents=4, num_generations=5):
+    print(
+        f"Initializing Leviathan Evolutionary Simulation (G={num_generations}, N={num_agents})..."
+    )
 
-    # 1. Setup Brains
-    num_nodes = 200
-    brains = [LeviathanNetwork(num_nodes) for _ in range(num_agents)]
-    motor_decoders = [MotorDecoder(network=b) for b in brains]
+    # 1. Setup Evolution
+    evo = EvoController(population_size=num_agents)
+    current_genomes = [Genome() for _ in range(num_agents)]
 
-    # 5 Raycast Sensors -> Thalamus nodes 0-4
-    # 5 Wall Sensors -> Thalamus nodes 5-9
-    # 5 Peer Sensors -> Thalamus nodes 15-19
-    sensor_indices = list(range(5))
-    wall_indices = list(range(5, 10))
-    peer_indices = list(range(15, 20))
+    for gen in range(num_generations):
+        print(f"\n--- GENERATION {gen} ---")
 
-    # 2. Setup Body/Environment
-    arena = Arena(width=800, height=600, num_foods=25, num_agents=num_agents)
-    arena.add_default_obstacles()
+        # Initialize Brains with Genomes
+        num_nodes = 200
+        brains = [LeviathanNetwork(num_nodes, genome=g) for g in current_genomes]
+        motor_decoders = [MotorDecoder(network=b) for b in brains]
 
-    # Logging
-    history = {
-        "x": [],
-        "y": [],
-        "heading": [],
-        "atp": [],
-        "da": [],
-        "na": [],
-        "ser": [],
-        "ach": [],
-        "entropy": [],
-        "torque_l": [],
-        "torque_r": [],
-        "foods_eaten": 0,
-        "replay_buffer": [],  # Store (phi_dot, target_vec) on reward
-        "last_torques": [(0.0, 0.0) for _ in range(num_agents)],
-    }
-    # Track baseline ATP across all agents
-    start_atp = float(sum(b.atp.sum() for b in brains))
+        # Sensor mappings
+        sensor_indices = list(range(5))
+        wall_indices = list(range(5, 10))
+        peer_indices = list(range(15, 20))
 
-    print(f"Starting simulation for {ticks} ticks...")
-    for tick in range(ticks):
-        for a_idx in range(num_agents):
-            brain = brains[a_idx]
-            decoder = motor_decoders[a_idx]
+        # Arena
+        arena = Arena(width=800, height=600, num_foods=25, num_agents=num_agents)
+        arena.add_default_obstacles()
+
+        # Logging
+        history = {
+            "foods_eaten": 0,
+            "last_torques": [(0.0, 0.0) for _ in range(num_agents)],
+            "replay_buffer": [],
+        }
+
+        print(f"Starting GEN {gen} for {ticks} ticks...")
+        for tick in range(ticks):
+            for a_idx in range(num_agents):
+                brain = brains[a_idx]
+                decoder = motor_decoders[a_idx]
 
             # ---- SENSORY PHASE ----
             # Tri-channel raycasts: food, walls, peers
@@ -146,25 +143,6 @@ def run_agent_simulation(ticks=3000, num_agents=3):
             torque_r = raw_r * MOTOR_GAIN + 2.0
 
             foods_eaten = arena.move_agent(a_idx, torque_l, torque_r)
-            history["last_torques"][a_idx] = (torque_l, torque_r)
-
-            # ---- REWARD PHASE ----
-            if foods_eaten > 0:
-                history["foods_eaten"] += foods_eaten
-                brain.atp += ATP_FOOD_REWARD * foods_eaten
-                brain.DA = min(brain.DA + DA_REWARD_SPIKE * foods_eaten, 10.0)
-
-                # Consolidate memory
-                history["replay_buffer"].append(
-                    {
-                        "brain_idx": a_idx,
-                        "state": brain.phi_dot.clone(),
-                        "target": (
-                            target_vec.clone() if "target_vec" in locals() else None
-                        ),
-                    }
-                )
-
         if tick % 100 == 0:
             # Stats for first agent (as a representative)
             b0 = brains[0]
@@ -199,21 +177,16 @@ def run_agent_simulation(ticks=3000, num_agents=3):
                         f"  [Replay {i:>3}] Brain {memory['brain_idx']} LSM Loss: {loss:.4f}"
                     )
 
-    print("\nSimulation Complete.")
-    print(f"  Total Food Eaten : {history['foods_eaten']}")
-    print(f"  Final Avg ATP    : {history['atp'][-1]:.1f}")
-    print(f"  Final Edge Count : {brain.weights.shape[0]}")
-    print(f"  Avg Degree       : {brain.weights.shape[0]/num_nodes:.2f}")
+        # End of Generation: Selection
+        fitness_scores = []
+        for b in brains:
+            # Fitness = Final ATP + bonus for food eaten (not directly tracked here, so using ATP)
+            fitness_scores.append(float(b.atp.mean()))
 
-    atp_spent = (
-        start_atp - float(brain.atp.sum()) + (history["foods_eaten"] * ATP_FOOD_REWARD)
-    )
-    efficiency = history["foods_eaten"] / (atp_spent / 1000.0 + 1e-6)
-    print(f"  Metabolic Eff    : {efficiency:.2f} foods/k-ATP")
-    print(f"  Final Entropy    : {history['entropy'][-1]:.3f}")
+        print(f"Gen {gen} Best Fitness: {max(fitness_scores):.1f}")
+        current_genomes = evo.select_and_reproduce(fitness_scores, current_genomes)
 
-    np.save("agent_trajectory.npy", history)
-    print("Saved agent trajectory to agent_trajectory.npy")
+    print("\nEvolutionary Run Complete.")
 
 
 if __name__ == "__main__":

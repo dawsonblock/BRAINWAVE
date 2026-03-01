@@ -1,4 +1,5 @@
 import torch
+import math
 from .network import LeviathanNetwork
 from .config import (
     INITIAL_ATP,
@@ -23,26 +24,41 @@ from .config import (
 
 def update_metabolism(network: LeviathanNetwork):
     """
-    Drains ATP based on the cost equation.
-    Maintenance cost is now computed per-row from CSR (consistent with pruning).
-    dE_i/dt = -(R_basal + k_cost * |phi_dot_i| + k_maint * sum_incoming_weights_i)
+    Biological maintenance cost with Evolutionary aging.
+    ATP spent on:
+    1. Base metabolism (R_BASAL)
+    2. Phase velocity (K_COST)
+    3. Synaptic maintenance (K_MAINT)
+    4. Senescence (exponential multiplier based on age)
     """
+    network.age += 1
+
+    # 1. Component Costs
     velocity_cost = K_COST * torch.abs(network.phi_dot)
 
-    # Per-node incoming weight sum via scatter_add over CSR edges (O(E), exact)
+    # Synaptic maintenance (CSR scatter_add)
     row_w_sum = torch.zeros(network.num_nodes, device=network.weights.device)
-    row_w_sum.scatter_add_(0, network.dst_idx, network.weights)
+    row_w_sum.scatter_add_(0, network.dst_idx, torch.abs(network.weights))
     synaptic_cost = K_MAINT * row_w_sum
 
-    drain = (R_BASAL + velocity_cost + synaptic_cost) * DT
-    network.atp -= drain
+    # 2. Senescence multiplier (Senescence onset around 2000 ticks)
+    senescence = math.exp(network.age / 2000.0)
 
-    # Starving nodes: emergency ATP boost, then CSR-aware pruning
+    # 3. Genomic adaptation factor (scaling base maintenance)
+    genomic_factor = network.genome.data["atp_decay_rate"] if network.genome else 1.0
+
+    # 4. Total Drain
+    drain = (R_BASAL * genomic_factor + velocity_cost + synaptic_cost) * senescence * DT
+    network.atp -= drain
+    network.atp = torch.clamp(network.atp, 0.0, 100000.0)
+
+    # Starving nodes (Emergency boost + Pruning)
     starving = torch.where(network.atp <= ATP_DEATH_THRESHOLD)[0]
     for i in starving:
-        network.atp[i] = 10.0
+        network.atp[i] = 10.0  # Emergency minimum
 
-    network.prune_weakest_starving()
+    if len(starving) > 0:
+        network.prune_weakest_starving()
 
 
 def update_neuromodulators(network: LeviathanNetwork):

@@ -11,7 +11,9 @@ Key upgrades over Phase 7:
 """
 
 import torch
+import torch.nn as nn
 import math
+import numpy as np
 from .config import (
     DT,
     MAX_DELAY_TICKS,
@@ -31,9 +33,19 @@ LYAPUNOV_WARN = 1e6  # energy threshold before logging divergence warning
 CORTEX_LABEL = "cortex"
 
 
-class LeviathanNetwork:
-    def __init__(self, num_nodes: int):
+class LeviathanNetwork(nn.Module):  # Inherit from nn.Module
+    def __init__(self, num_nodes: int, genome=None):
+        super().__init__()  # Call super().__init__()
         self.num_nodes = num_nodes
+        self.genome = genome  # Store genome
+
+        # ── Evolutionary Parameters ────────────────────────────────────
+        self.age = 0
+        self.ETA_PLUS = genome.data["eta_plus"] if genome else 0.05
+        self.ETA_MINUS = genome.data["eta_minus"] if genome else 0.04
+        self.GWT_K = genome.data["gwt_k"] if genome else 10
+        self.GWT_GAIN = genome.data["gwt_gain"] if genome else 0.5
+        weight_std = genome.data["initial_weight_std"] if genome else 0.1
 
         # ── Spatial topology initialization ──
         # (This just sets up candidate regions; build_csr_topology will re-order nodes for locality)
@@ -47,13 +59,18 @@ class LeviathanNetwork:
         (
             self.row_ptr,
             self.col_idx,
-            self.weights,
+            initial_weights,  # Temporary variable to hold weights from topology
             self.delay_ticks,
             self.is_inhibitory,
             self.positions,
             self.region_labels,
         ) = build_csr_topology(self.positions, self.region_labels)
 
+        # Now assign weights, explicitly disabling requires_grad for custom plasticity
+        self.edge_count = self.col_idx.shape[0]
+        self.weights = nn.Parameter(
+            torch.randn(self.edge_count) * weight_std, requires_grad=False
+        )
         # ── Precomputed dst_idx for vectorized coupling ─────────────────
         # dst_idx[e] = destination node of edge e (expanded from row_ptr)
         self.dst_idx = self._build_dst_idx()
@@ -104,9 +121,7 @@ class LeviathanNetwork:
         self.lsm = LiquidStateMachine(input_dim=num_nodes, output_dim=2)
         self.lsm_loss = 0.0
 
-        # ── Phase 16: Global Workspace (GWT) ──────────────────────────
-        self.GWT_K = 10  # Capacity of consciousness (top-K nodes)
-        self.GWT_GAIN = 0.5  # Strength of global broadcast
+        # Workspace indices placeholder
         self.workspace_indices = torch.zeros(self.GWT_K, dtype=torch.long)
 
     # ─────────────────────────────────────────────────────────────────────

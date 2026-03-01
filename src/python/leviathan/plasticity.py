@@ -48,8 +48,10 @@ def apply_ptdp(network, delayed_phi_edge: torch.Tensor):
     if neg.any():
         dw[neg] = -effective_eta_minus * torch.exp(delta[neg] / TAU_MINUS)
 
-    network.weights.add_(dw)
-    network.weights.clamp_(min=0.0)
+    # 4. Apply Update (In-place)
+    with torch.no_grad():
+        network.weights.add_(dw)
+        network.weights.clamp_(-1.5, 1.5)
 
     # Vectorized homeostatic per-row normalization
     # row_sum[i] = Σ weight_ij for all j in incoming(i)
