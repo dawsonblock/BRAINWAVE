@@ -15,7 +15,9 @@ class Wall:
 
 
 class Arena:
-    def __init__(self, width=800, height=600, num_foods=20, walls=None):
+    def __init__(self, width=800, height=600, num_foods=20, walls=None, seed=None):
+        if seed is not None:
+            random.seed(seed)
         self.width = width
         self.height = height
 

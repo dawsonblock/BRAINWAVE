@@ -1,65 +1,59 @@
 """
-plasticity.py — Sparse CSR Phase-Timing-Dependent Plasticity (Phase 9)
+plasticity.py — Fully Vectorized Sparse CSR Phase-Timing-Dependent Plasticity (Phase 10)
 
-Key changes over Phase 7:
-  - Works directly on CSR edge arrays (no NxN allocation)
-  - Uses per-edge delayed phases returned by network.step()
-  - atan2 wrapping for correct [-π, π] delta_phi
-  - Per-row homeostatic normalization identical to CUDA kernel
+Key changes:
+  - Eliminated O(N) loop over nodes. Entire update is now O(E) via tensor masks.
+  - Vectorized homeostatic normalization using scatter_add.
+  - Identical logic to CUDA ptdp.cu kernel.
 """
 
 import torch
 from .config import SYNAPTIC_W_MAX
 
-ETA_PLUS = 0.001  # LTP rate
-ETA_MINUS = 0.001  # LTD rate
-TAU_PLUS = 0.5  # LTP time constant
-TAU_MINUS = 0.5  # LTD time constant
+ETA_PLUS = 0.001
+ETA_MINUS = 0.001
+TAU_PLUS = 0.5
+TAU_MINUS = 0.5
 
 
 def apply_ptdp(network, delayed_phi_edge: torch.Tensor):
     """
-    Apply PTDP in-place to network.weights using CSR layout.
+    Apply PTDP in-place to network.weights using fully vectorized CSR layout.
 
     Args:
-      network: LeviathanNetwork (provides row_ptr, col_idx, weights, phi, DA)
-      delayed_phi_edge: (E,) tensor — delayed source phase per edge,
-                         as returned by network.step() / network._get_delayed_phi_per_edge()
+      network: LeviathanNetwork (provides row_ptr, dst_idx, weights, phi, DA)
+      delayed_phi_edge: (E,) tensor — delayed source phase per edge.
     """
-    N = network.num_nodes
     da = float(network.DA)
+    phi_dst = network.phi[network.dst_idx]  # (E,)
 
-    for dst in range(N):
-        start = int(network.row_ptr[dst])
-        end = int(network.row_ptr[dst + 1])
-        if end == start:
-            continue
+    # Δφ = φ_src(t - τ) - φ_dst(t), wrapped to [-π, π]
+    delta = torch.atan2(
+        torch.sin(delayed_phi_edge - phi_dst), torch.cos(delayed_phi_edge - phi_dst)
+    )
 
-        # Δφ = φ_src(t - τ) - φ_dst(t), wrapped to [-π, π]
-        phi_del = delayed_phi_edge[start:end]  # (deg,)
-        phi_dst = network.phi[dst]
-        delta = phi_del - phi_dst
-        delta = torch.atan2(torch.sin(delta), torch.cos(delta))
+    pos = delta > 0
+    neg = ~pos
 
-        pos = delta > 0  # j leads i → potentiate
-        neg = ~pos  # i leads j → depress
+    # Compute weight updates for ALL edges at once
+    dw = torch.zeros_like(network.weights)
+    if pos.any():
+        dw[pos] = da * ETA_PLUS * torch.exp(-delta[pos] / TAU_PLUS)
+    if neg.any():
+        dw[neg] = -ETA_MINUS * torch.exp(delta[neg] / TAU_MINUS)
 
-        w = network.weights[start:end]
+    network.weights.add_(dw)
+    network.weights.clamp_(min=0.0)
 
-        # LTP
-        if pos.any():
-            w[pos] += da * ETA_PLUS * torch.exp(-delta[pos] / TAU_PLUS)
+    # Vectorized homeostatic per-row normalization
+    # row_sum[i] = Σ weight_ij for all j in incoming(i)
+    row_sum = torch.zeros(network.num_nodes, device=network.weights.device)
+    row_sum.scatter_add_(0, network.dst_idx, network.weights)
 
-        # LTD (delta is negative here, exp receives positive value)
-        if neg.any():
-            w[neg] -= ETA_MINUS * torch.exp(delta[neg] / TAU_MINUS)
+    # Scale only the rows that exceed MAX
+    scale = torch.ones_like(row_sum)
+    over_mask = row_sum > SYNAPTIC_W_MAX
+    scale[over_mask] = SYNAPTIC_W_MAX / row_sum[over_mask].clamp(min=1e-6)
 
-        # Clamp: weights ≥ 0
-        w.clamp_(min=0.0)
-
-        # Homeostatic normalization — row sum must not exceed SYNAPTIC_W_MAX
-        row_sum = w.sum()
-        if row_sum > SYNAPTIC_W_MAX:
-            w *= SYNAPTIC_W_MAX / row_sum
-
-        network.weights[start:end] = w
+    # Apply per-row scale to each edge's weight
+    network.weights.mul_(scale[network.dst_idx])

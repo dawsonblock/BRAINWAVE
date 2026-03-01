@@ -1,5 +1,3 @@
-import math
-
 # --- 1. Physics & Delays ---
 CONDUCTION_VELOCITY = 10.0  # arbitrary distance units per second
 DT = 0.01  # Integration time step (seconds)
@@ -41,7 +39,11 @@ ACH_BASAL = 0.5
 
 # --- EMBODIED ENVIRONMENT (PHASE 7) ---
 ATP_FOOD_REWARD = 500.0
-DA_REWARD_SPIKE = 2.00
+DA_REWARD_SPIKE = 2.0
+
+SENSORY_GAIN = 80.0
+MOTOR_GAIN = 10.0
+WALL_GAIN = 48.0
 
 ATP_TARGET = 800.0
 THETA_NOVEL = 5.0  # rad/s threshold for novelty detection

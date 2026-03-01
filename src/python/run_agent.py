@@ -4,13 +4,13 @@ from environment.arena import Arena
 from leviathan.network import LeviathanNetwork
 from leviathan.motor import MotorDecoder
 from leviathan.endocrine import update_metabolism, update_neuromodulators
-from leviathan.config import DA_REWARD_SPIKE, ATP_FOOD_REWARD
-
-SENSORY_GAIN = 80.0
-# Motor gain converts raw phase velocity sum into arena-scale torque values
-MOTOR_GAIN = 10.0
-# Wall danger raycasts are dampened relative to food
-WALL_GAIN = 48.0
+from leviathan.config import (
+    DA_REWARD_SPIKE,
+    ATP_FOOD_REWARD,
+    SENSORY_GAIN,
+    MOTOR_GAIN,
+    WALL_GAIN,
+)
 
 
 def run_agent_simulation(ticks=3000):

@@ -19,7 +19,6 @@ from .config import (
     DEFAULT_INERTIA,
     DEFAULT_DAMPING,
     ATP_DEATH_THRESHOLD,
-    SYNAPTIC_W_MAX,
 )
 from .topology import generate_spatial_topology, build_csr_topology
 
@@ -72,7 +71,9 @@ class LeviathanNetwork:
 
         # Cortex mask — ACh applied here only
         self._cortex_mask = torch.tensor(
-            [label == CORTEX_LABEL for label in self.region_labels], dtype=torch.bool
+            [label.startswith("cortex") for label in self.region_labels],
+            dtype=torch.bool,
+            device=self.phi.device,
         )
 
         # ── Neuromodulators ────────────────────────────────────────────
@@ -192,9 +193,7 @@ class LeviathanNetwork:
     def prune_weakest_starving(self):
         """
         For each node whose ATP < threshold, prune its weakest incoming synapse.
-        Called from endocrine.update_metabolism.
         """
-        N = self.num_nodes
         starving = (self.atp < ATP_PRUNE_THRESHOLD).nonzero(as_tuple=True)[0]
         for dst in starving:
             dst = int(dst)
