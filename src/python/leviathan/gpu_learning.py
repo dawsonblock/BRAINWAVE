@@ -46,13 +46,20 @@ def gpu_ptdp_step(
     dw[pos] = da * ETA_PLUS * torch.exp(-delta[pos] / TAU_PLUS)
     dw[neg] = -ETA_MINUS * torch.exp(delta[neg] / TAU_MINUS)
 
+    # Dale's Principle Sign Enforcement
+    pos_mask = (weights > 0).float()
+    neg_mask = (weights < 0).float()
+
     weights.add_(dw)
-    weights.clamp_(min=0.0)
+
+    # Clamp based on original sign: don't let LTP/LTD flip the sign
+    weights.mul_(pos_mask).clamp_(min=0.0)
+    weights.add_(weights.mul_(neg_mask).clamp_(max=0.0))
 
     # Homeostatic per-row normalization via scatter
     N = phi.shape[0]
     row_sum = torch.zeros(N, device=weights.device)
-    row_sum.scatter_add_(0, dst_idx, weights)
+    row_sum.scatter_add_(0, dst_idx, weights.abs())  # normalize by magnitude
 
     scale = (row_sum > SYNAPTIC_W_MAX).float() * (
         SYNAPTIC_W_MAX / row_sum.clamp(min=1e-6)

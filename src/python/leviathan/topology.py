@@ -13,7 +13,14 @@ run_agent.py / LeviathanNetwork don't need changes.
 import torch
 import math
 import random
-from .config import TOPOLOGY_LAMBDA, CONDUCTION_VELOCITY, DT, MAX_DELAY_TICKS
+from .config import (
+    TOPOLOGY_LAMBDA,
+    CONDUCTION_VELOCITY,
+    DT,
+    MAX_DELAY_TICKS,
+    INHIBITORY_FRACTION,
+    E_I_STRENGTH_RATIO,
+)
 
 INIT_W_SCALE = 0.5
 
@@ -83,7 +90,22 @@ def build_csr_topology(positions: torch.Tensor, region_labels: list):
     bx_arr = (xy_n[:, 0] / bin_size).long()
     by_arr = (xy_n[:, 1] / bin_size).long()
 
-    # Build bin → node index
+    # --- Phase 11: Spatial Tiling (Re-ordering for Locality) ---
+    # Sort nodes by bin index to ensure spatial neighbors are memory neighbors
+    bin_idx = bx_arr * 1000 + by_arr  # simple 2D hash for sorting
+    order = torch.argsort(bin_idx)
+
+    positions = positions[order]
+    region_labels = [region_labels[i] for i in order.tolist()]
+
+    # Re-calculate bin markers for the new order
+    xy = positions[:, :2]
+    xy_n = xy - xy.min(dim=0).values
+    bx_arr = (xy_n[:, 0] / bin_size).long()
+    by_arr = (xy_n[:, 1] / bin_size).long()
+
+    # E/I Assignment
+    is_inhibitory = torch.rand(N) < INHIBITORY_FRACTION
     bins: dict[tuple, list] = {}
     for i in range(N):
         key = (int(bx_arr[i]), int(by_arr[i]))
@@ -104,7 +126,13 @@ def build_csr_topology(positions: torch.Tensor, region_labels: list):
                     if random.random() < math.exp(-dist / lam):
                         dst_list.append(dst)
                         src_list.append(src)
-                        w_list.append(random.random() * INIT_W_SCALE)
+
+                        # Dale's Principle: Excitatory vs Inhibitory
+                        w = random.random() * INIT_W_SCALE
+                        if is_inhibitory[src]:
+                            w = -w * E_I_STRENGTH_RATIO
+                        w_list.append(w)
+
                         ticks = max(1, min(int(dist / (v_c * dt)), MAX_DELAY_TICKS - 1))
                         d_list.append(ticks)
 
@@ -131,7 +159,15 @@ def build_csr_topology(positions: torch.Tensor, region_labels: list):
     row_ptr[1:].scatter_add_(0, dsts.int(), torch.ones(E, dtype=torch.int32))
     row_ptr = torch.cumsum(row_ptr, dim=0)
 
-    return row_ptr.int(), srcs.int(), ws.float(), ds.int()
+    return (
+        row_ptr.int(),
+        srcs.int(),
+        ws.float(),
+        ds.int(),
+        is_inhibitory,
+        positions,
+        region_labels,
+    )
 
 
 def build_distance_graph(

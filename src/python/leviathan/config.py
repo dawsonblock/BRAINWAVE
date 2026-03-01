@@ -66,3 +66,7 @@ REGIONS = {
 }
 
 TOPOLOGY_LAMBDA = 5.0  # decay constant for connection probability
+
+# --- 6. Phase 11: E/I & Structural ---
+INHIBITORY_FRACTION = 0.2  # 20% inhibitory nodes
+E_I_STRENGTH_RATIO = 4.0  # Inhibitory synapses are 4x stronger to balance 4:1 E/I ratio

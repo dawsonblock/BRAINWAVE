@@ -35,19 +35,24 @@ class LeviathanNetwork:
     def __init__(self, num_nodes: int):
         self.num_nodes = num_nodes
 
-        # ── Spatial topology ──────────────────────────────────────────
+        # ── Spatial topology initialization ──
+        # (This just sets up candidate regions; build_csr_topology will re-order nodes for locality)
         self.positions, self.base_omegas, self.region_labels = (
             generate_spatial_topology(num_nodes)
         )
 
         # ── Sparse CSR connectivity ────────────────────────────────────
-        # row_ptr: (N+1,)  — row i spans edges [row_ptr[i], row_ptr[i+1])
-        # col_idx: (E,)    — source node for each edge (row = destination)
-        # weights: (E,)    — synaptic strength
-        # delay_ticks: (E,) — integer ring-buffer offset
-        (self.row_ptr, self.col_idx, self.weights, self.delay_ticks) = (
-            build_csr_topology(self.positions, self.region_labels)
-        )
+        # Phase 11: build_csr_topology now returns:
+        # row_ptr, col_idx, weights, delay_ticks, is_inhibitory, positions, region_labels
+        (
+            self.row_ptr,
+            self.col_idx,
+            self.weights,
+            self.delay_ticks,
+            self.is_inhibitory,
+            self.positions,
+            self.region_labels,
+        ) = build_csr_topology(self.positions, self.region_labels)
 
         # ── Precomputed dst_idx for vectorized coupling ─────────────────
         # dst_idx[e] = destination node of edge e (expanded from row_ptr)
@@ -59,6 +64,12 @@ class LeviathanNetwork:
         # ── Phase / velocity state ─────────────────────────────────────
         self.phi = torch.zeros(num_nodes)
         self.phi_dot = torch.zeros(num_nodes)
+
+        # ── Active Inference (Generative Model) ───────────────────────
+        self.phi_target = torch.zeros(num_nodes)  # Target/expected phase
+        self.mu = torch.zeros(num_nodes)  # Internal belief
+        self.error = torch.zeros(num_nodes)  # Prediction error
+        self.ALPHA_ACTIVE_INF = 0.5  # Precision/gain on error
 
         # Ring buffers  (MAX_DELAY_TICKS, N)
         self.history_phi = torch.zeros(MAX_DELAY_TICKS, num_nodes)
@@ -125,7 +136,12 @@ class LeviathanNetwork:
         inertia: torch.Tensor,
     ) -> torch.Tensor:
         """RHS of the second-order DDE: acceleration computation."""
-        return (coupling + S + noise - self.c * (phi_dot - self.base_omegas)) / inertia
+        # Standard dynamics + Active Inference error minimization drive
+        # dphi_dot += -alpha * (predicted - sensory)
+        ai_drive = -self.ALPHA_ACTIVE_INF * self.error
+        return (
+            coupling + S + noise + ai_drive - self.c * (phi_dot - self.base_omegas)
+        ) / inertia
 
     # ─────────────────────────────────────────────────────────────────────
     def step(self, external_sensory_input=None):
@@ -145,6 +161,12 @@ class LeviathanNetwork:
             else torch.zeros(N)
         )
         noise = self.NA * torch.randn(N)
+
+        # ── Active Inference: Update Error ────────────────────────────
+        # Error = Actual - Expected (simplified)
+        self.error = self.phi - self.phi_target
+        # Wrap error to [-pi, pi]
+        self.error = torch.atan2(torch.sin(self.error), torch.cos(self.error))
 
         # ── Region-scoped ACh: inertia reduction in cortex only ────────
         inertia = self.m.clone()
