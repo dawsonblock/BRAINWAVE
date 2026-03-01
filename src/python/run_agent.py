@@ -68,6 +68,28 @@ def run_agent_simulation(ticks=3000):
             if wall_indices[i] < num_nodes:
                 s_input[wall_indices[i]] = WALL_GAIN * float(prox)
 
+        # ---- PHASE 16: Chemical Gradient (Scent) ----
+        scent_intensity = arena.get_chemical_gradient()
+        # Broadcast scent to "Limbic" nodes (indices 10-14 as a proxy for olfactory bulb)
+        scent_indices = list(range(10, 15))
+        for i in scent_indices:
+            s_input[i] += scent_intensity * 50.0  # High gain for gradient sensing
+
+        # ---- PHASE 16: LSM Memory Drive (Goal Attractor) ----
+        # If hungry (low ATP), use LSM prediction as a top-down drive
+        if brain.atp.mean() < 800.0:
+            # Get LSM prediction from last reservoir state
+            # This is the "internal belief" of where food is
+            memory_vec = brain.lsm.readout(brain.phi_dot)  # Prediction: [dx, dy]
+
+            # Map memory_vec to a phase drive
+            # Injecting drive into indices 20-39 (Association Cortex)
+            association_indices = list(range(20, 40))
+            drive_mag = 10.0 * (1.0 - (brain.atp.mean() / 800.0))  # Hunger scales drive
+            for i in association_indices:
+                # Simple drive: move phase towards the 'memory' direction
+                s_input[i] += drive_mag * torch.mean(torch.abs(memory_vec))
+
         # ---- COGNITIVE PHASE ----
         delayed_phi = brain.step(external_sensory_input=s_input)
 

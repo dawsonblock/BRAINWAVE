@@ -104,6 +104,11 @@ class LeviathanNetwork:
         self.lsm = LiquidStateMachine(input_dim=num_nodes, output_dim=2)
         self.lsm_loss = 0.0
 
+        # ── Phase 16: Global Workspace (GWT) ──────────────────────────
+        self.GWT_K = 10  # Capacity of consciousness (top-K nodes)
+        self.GWT_GAIN = 0.5  # Strength of global broadcast
+        self.workspace_indices = torch.zeros(self.GWT_K, dtype=torch.long)
+
     # ─────────────────────────────────────────────────────────────────────
     def _build_dst_idx(self) -> torch.Tensor:
         """Expand row_ptr into per-edge destination indices (precomputed once)."""
@@ -164,6 +169,20 @@ class LeviathanNetwork:
 
         # ── Coupling (O(E)) ────────────────────────────────────────────
         coupling = self._sparse_coupling()
+
+        # ── Global Workspace Broadcast (GWT) ──────────────────────────
+        # Identify top-K most active nodes (highest phi_dot)
+        # These nodes "broadcast" their state to the entire network
+        _, self.workspace_indices = torch.topk(torch.abs(self.phi_dot), self.GWT_K)
+
+        # Mean phase of the workspace nodes
+        workspace_phi = torch.mean(self.phi[self.workspace_indices])
+
+        # Broadcast term: global attractor towards workspace consensus
+        gwt_broadcast = self.GWT_GAIN * torch.sin(workspace_phi - self.phi)
+
+        # Add broadcast to coupling
+        coupling += gwt_broadcast
 
         # ── Sensory + Noise ────────────────────────────────────────────
         S = (

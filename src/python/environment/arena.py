@@ -159,6 +159,25 @@ class Arena:
 
         return food_prox, wall_prox
 
+    # ── Chemical Gradient (Scents) ───────────────────────────────────────
+    def get_chemical_gradient(self):
+        """
+        Returns a scalar intensity of the 'scent' (food proximity sum).
+        Formula: Σ (1 / (distance^2 + epsilon)) for all food items.
+        """
+        intensity = 0.0
+        epsilon = 100.0  # Smooths out infinite spikes when on top of food
+        for fx, fy in self.foods:
+            dx = self.agent_x - fx
+            dy = self.agent_y - fy
+            dist_sq = dx * dx + dy * dy
+            intensity += 1.0 / (dist_sq + epsilon)
+
+        # Scaling intensity for neural input [0, ~1.0]
+        # With epsilon=100, max intensity per food is 0.01.
+        # With 20 foods, max possible is ~0.2. Scaling up for visibility.
+        return min(intensity * 10.0, 1.0)
+
     # ── Serialisation (for dashboard) ───────────────────────────────────
     def to_dict(self, brain):
         return {
